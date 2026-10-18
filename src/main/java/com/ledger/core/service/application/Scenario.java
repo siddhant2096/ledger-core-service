@@ -41,15 +41,16 @@ public final class Scenario {
     public static final int INSTALMENT_COUNT = 3;
 
     /**
-     * Explicit per-currency overdraft fee schedule. AED 25.00 is the supplied
-     * requirement. BHD 25.000 is an explicit, documented implementation choice
-     * (same numeric value, account currency — AMBIGUITIES.md #15); it is
-     * configuration, not a silent fallback, and a currency absent from this
-     * map is charged NOTHING (the skip is recorded in the replay trace).
+     * Explicit per-currency overdraft fee schedule for the default scenario.
+     * Contains ONLY the supplied requirement: AED 25.00. No BHD fee is
+     * configured — the requirements do not authorize one — so a negative BHD
+     * account is charged NOTHING and the skip is recorded in the replay trace
+     * ({@code SkippedFeeAssessment}). The engine supports additional currencies
+     * purely as configuration for when the business authorizes them; see
+     * AMBIGUITIES.md #15 and the dedicated tests.
      */
     public static final Map<CurrencyCode, Money> OVERDRAFT_FEE_SCHEDULE = Map.of(
-            CurrencyCode.AED, Money.of("25.00", CurrencyCode.AED),
-            CurrencyCode.BHD, Money.of("25.000", CurrencyCode.BHD));
+            CurrencyCode.AED, Money.of("25.00", CurrencyCode.AED));
 
     private Scenario() {
     }

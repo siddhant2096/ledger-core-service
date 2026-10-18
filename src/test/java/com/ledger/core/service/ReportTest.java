@@ -64,11 +64,23 @@ class ReportTest {
     void reportDistinguishesPreFeeAndPostFeeBalances() {
         // D2 line: final projection 225.00, fee 25.00, pre-fee -370.00.
         assertTrue(report.contains(
-                "OVERDRAFT FEE assessed for today: 25.00 — balance before this fee was -370.00"));
+                "OVERDRAFT FEE with value date today: 25.00 — pre-fee balance was -370.00"));
         assertTrue(report.contains("closing ledger balance (final projection): 225.00"));
         // Point-in-time trace proves WHEN each fee was derived.
         assertTrue(report.contains("assessed on " + Scenario.day(5)
                 + ": ACC-001 value date " + Scenario.day(2) + " pre-fee balance -370.00 -> fee 25.00"));
+    }
+
+    @Test
+    void reportNeverClaimsAFeeWasKnowableOnItsValueDate() {
+        // The D2 fee was discovered on D5. The report must say so explicitly,
+        // not imply the fee existed or was knowable on D2.
+        assertTrue(report.contains("fee first discovered and posted on processing date "
+                + Scenario.day(5)));
+        // The value date (D2) and the discovery date (D5) are distinct fields
+        // in the trace line.
+        assertTrue(report.contains("assessed on " + Scenario.day(5)
+                + ": ACC-001 value date " + Scenario.day(2)));
     }
 
     @Test

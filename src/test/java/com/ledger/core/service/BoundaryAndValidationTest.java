@@ -5,6 +5,7 @@ import com.ledger.core.service.application.ReplayResult;
 import com.ledger.core.service.application.ReplayResult.Outcome;
 import com.ledger.core.service.application.Scenario;
 import com.ledger.core.service.domain.account.Account;
+import com.ledger.core.service.domain.auth.Authorization;
 import com.ledger.core.service.domain.auth.AuthorizationStatus;
 import com.ledger.core.service.domain.entry.EntryKind;
 import com.ledger.core.service.domain.event.EventEnvelope;
@@ -105,14 +106,16 @@ class BoundaryAndValidationTest {
     }
 
     @Test
-    void bhdAccountIsChargedExplicitlyConfiguredBhdFeeNeverAed() {
-        // Policy: the fee comes from an EXPLICIT per-currency schedule
-        // (Scenario.OVERDRAFT_FEE_SCHEDULE), denominated in the account's own
-        // currency (no FX table exists). A negative BHD account pays the
-        // configured BHD 25.000 — a documented configuration choice, never a
-        // silent application of the AED requirement's numeric value.
-        ReplayResult result = run(List.of(BHD_ACCOUNT), List.of(
-                env("X1", 1, 1, new LedgerEvent.Debit("B", Money.of("1.000", CurrencyCode.BHD)))));
+    void bhdAccountIsChargedConfiguredFeeOnlyWhenScheduleAuthorizesIt() {
+        // Mechanism test: IF the business configures a BHD fee, a negative BHD
+        // account is charged in BHD (never AED — no FX table exists). The
+        // DEFAULT scenario schedule deliberately contains only AED 25.00.
+        ReplayResult result = new LedgerEngine(List.of(BHD_ACCOUNT),
+                Scenario.WINDOW_START, Scenario.WINDOW_END, Scenario.BUSINESS_ZONE,
+                java.util.Map.of(CurrencyCode.AED, Money.of("25.00", CurrencyCode.AED),
+                        CurrencyCode.BHD, Money.of("25.000", CurrencyCode.BHD)))
+                .replay(List.of(env("X1", 1, 1,
+                        new LedgerEvent.Debit("B", Money.of("1.000", CurrencyCode.BHD)))));
         assertEquals(Money.of("25.000", CurrencyCode.BHD), result.feeTrace().getFirst().feeAmount());
         assertEquals(CurrencyCode.BHD, result.entries().stream()
                 .filter(e -> e.kind() == EntryKind.FEE_OVERDRAFT)
@@ -120,15 +123,12 @@ class BoundaryAndValidationTest {
     }
 
     @Test
-    void accountInUnconfiguredCurrencyIsChargedNoFeeButTheSkipIsRecorded() {
-        // A fee schedule WITHOUT BHD: a negative BHD account must NOT be
-        // charged (no silent cross-currency fee) and the skip must be visible
-        // in the trace (no silent omission either).
-        ReplayResult result = new LedgerEngine(List.of(BHD_ACCOUNT),
-                Scenario.WINDOW_START, Scenario.WINDOW_END, Scenario.BUSINESS_ZONE,
-                java.util.Map.of(CurrencyCode.AED, Money.of("25.00", CurrencyCode.AED)))
-                .replay(List.of(env("X1", 1, 1,
-                        new LedgerEvent.Debit("B", Money.of("1.000", CurrencyCode.BHD)))));
+    void bhdAccountIsChargedNothingUnderTheDefaultAedOnlySchedule() {
+        // Default schedule = AED 25.00 only (the supplied requirement). A
+        // negative BHD account must NOT be charged (no silent cross-currency
+        // fee, no invented BHD fee) and the skip must be visible in the trace.
+        ReplayResult result = run(List.of(BHD_ACCOUNT), List.of(
+                env("X1", 1, 1, new LedgerEvent.Debit("B", Money.of("1.000", CurrencyCode.BHD)))));
         assertEquals(0, result.entries().stream()
                 .filter(e -> e.kind() == EntryKind.FEE_OVERDRAFT).count());
         assertTrue(result.feeTrace().isEmpty());
@@ -140,6 +140,35 @@ class BoundaryAndValidationTest {
         // Exactly one skip per account-date: the idempotency key also covers skips.
         assertEquals(6, result.skippedFees().stream()
                 .map(s -> s.valueDate()).distinct().count());
+    }
+
+    @Test
+    void approvedButNeverSettledHoldPersistsThroughWindowEnd() {
+        // The mechanism behind "Auth-B retains its hold through Day 6 IF
+        // approved": an APPROVED, never-settled hold is still active at the
+        // window end, reducing available balance but never the ledger balance.
+        // (In the real stream Auth-B is DECLINED, so this synthetic stream
+        // proves the persistence rule directly.)
+        ReplayResult result = run(List.of(AED_ACCOUNT), List.of(
+                env("X1", 1, 1, new LedgerEvent.Credit("A", Money.of("500.00", CurrencyCode.AED))),
+                env("X2", 2, 2, new LedgerEvent.AuthorizationRequest("A", "Auth-X",
+                        Money.of("90.00", CurrencyCode.AED)))));
+        Authorization auth = result.authorizations().get("Auth-X");
+        assertEquals(AuthorizationStatus.APPROVED, auth.status());
+        assertEquals(null, auth.settledOnDate());
+        // Still active after the full window (Day 6 evening has passed).
+        assertEquals(Money.of("90.00", CurrencyCode.AED),
+                LedgerEngine.activeHolds(result.authorizations(), AED_ACCOUNT));
+        // Ledger balance is hold-free: 500.00 on D1-D5 (plus interest on D6).
+        assertEquals(Money.of("500.00", CurrencyCode.AED),
+                LedgerEngine.closingBalance(result.entries(), AED_ACCOUNT, Scenario.day(5)));
+        // No ledger entry was ever derived from the authorization.
+        assertEquals(0, result.entries().stream()
+                .filter(e -> e.sourceEventId().equals("X2")).count());
+        // Interest was computed on the ledger balance (holds don't reduce it):
+        // 6 days x round(500.00 x 0.0004) = 6 x 0.20 = 1.20 capitalized.
+        assertEquals(Money.of("501.20", CurrencyCode.AED),
+                LedgerEngine.closingBalance(result.entries(), AED_ACCOUNT, Scenario.day(6)));
     }
 
     @Test

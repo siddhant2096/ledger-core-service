@@ -120,10 +120,14 @@ public final class ReportGenerator {
         out.append("     of which overdraft fees valued on/before today: ").append(fmt(feesToDate)).append("\n");
         for (FeeAssessment fee : result.feeTrace()) {
             if (fee.accountId().equals(account.id()) && fee.valueDate().equals(date)) {
-                out.append("   OVERDRAFT FEE assessed for today: ").append(fmt(fee.feeAmount()))
-                        .append(" — balance before this fee was ").append(fmt(fee.preFeeBalance()))
-                        .append(" (assessment ran on processing date ").append(fee.assessedOnDate())
-                        .append(")\n");
+                // The fee's VALUE date is today; it was DISCOVERED and posted on
+                // the processing date shown — which may be later, when a late
+                // back-valued event reveals a historical overdraft. The report
+                // must never imply the fee was knowable on its value date.
+                out.append("   OVERDRAFT FEE with value date today: ").append(fmt(fee.feeAmount()))
+                        .append(" — pre-fee balance was ").append(fmt(fee.preFeeBalance()))
+                        .append("; fee first discovered and posted on processing date ")
+                        .append(fee.assessedOnDate()).append("\n");
             }
         }
         out.append("   active holds: ").append(fmt(activeHolds)).append(activeHoldNames(account, date)).append("\n");

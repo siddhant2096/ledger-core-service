@@ -285,3 +285,46 @@ WORKLOG); (D) final verification and focused commits.
   expected). Full replay figures unchanged: ACC-001 390.93, fees -75.00, interest
   0.93; ACC-002 10.008, interest 0.008; Auth-A PARTIALLY_SETTLED, Auth-B DECLINED,
   E6 REJECTED (unknown authorization).
+
+---
+
+# Phase 4 — review pass against the original requirements
+
+## 2026-10-18 18:45 IST — Baseline
+
+- Repo clean on `main` at `b3d29f1`, 12 commits ahead of origin.
+- Baseline: `mvn clean test` -> 76 tests, 0 failures — BUILD SUCCESS.
+
+## 2026-10-18 18:50 IST — Review findings and plan
+
+1. **BHD fee in default scenario**: the reviewer is right that the DEFAULT scenario
+   should retain only the specified AED 25.00. The engine keeps its explicit
+   per-currency schedule mechanism (that part is a genuine improvement), but the
+   default schedule drops BHD 25.000. BHD behaviour is then: negative BHD account ->
+   no fee, visible SkippedFeeAssessment. A mechanism test keeps a BHD-configured
+   engine proving the schedule works when a business decision authorizes it.
+2. Non-monotonic processing dates (E9@D6 before E10@D5): already handled in stream
+   order; adding an explicit regression test pinning fee trace size (3), distinct
+   value dates, and E10's D5-valued instalments.
+3. Fee value date vs discovery date: report fee line reworded so the Day-2 fee is
+   explicitly "first discovered and posted on processing date 2026-01-05" — no claim
+   it was known on Day 2.
+4. Auth tests: Auth-A assertions exist (e5 test); adding Auth-B zero-hold assertions
+   and a synthetic approved-never-settled hold persisting through Day 6.
+5. Interest policy: already pinned (post-fee bases, HALF_UP per day, capitalized =
+   exact sum). No change.
+6. **Point-6 figures discrepancy (important, honest finding)**: the requested
+   "Days 4-6 = 440.00 pre-capitalization" figures correspond to a ONE-fee model
+   (only the D2 fee). Under the documented policy — every value date is re-examined
+   every evening (this task's own point 2: "ensure all relevant value dates are
+   examined"), and assessed fees are immutable (point 2/Step 3) — D4 and D5 were
+   genuinely negative on the D5 evening (-180.00 / -205.00 with fee participation;
+   -155.00 / -155.00 even without it), so D4 and D5 fees fire and persist. The 440
+   model requires either erasing assessed fees at E9 (forbidden) or never assessing
+   D4/D5 despite negative closings (violates the fee rule and the "examine all
+   relevant value dates" instruction). Keeping the three-fee policy; asserting the
+   requested D1/D2/D3 figures (which match under both models: 250.00 / 225.00 /
+   625.00) and documenting the D4-D6 discrepancy with full arithmetic in REJECTED.md.
+7. Instalment conservation: already pinned (3.333/3.333/3.334 = 10.000).
+8. Report auth states and projection-vs-point-in-time distinction: already present;
+   strengthened by the fee-line rewording.

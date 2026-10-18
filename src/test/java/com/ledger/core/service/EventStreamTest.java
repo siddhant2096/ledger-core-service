@@ -137,8 +137,11 @@ class EventStreamTest {
         var authB = result.authorizations().get("Auth-B");
         assertEquals(AuthorizationStatus.DECLINED, authB.status());
         assertEquals(0, entriesOf("E8").size());
-        // A declined hold never reduces available balance.
+        // A declined hold never creates an active hold, on D5, D6, or ever.
         assertEquals(aed("0.00"), LedgerEngine.activeHolds(result.authorizations(), acc001));
+        // (The "retain the hold through Day 6 if approved" rule applies only to
+        // approved authorizations; the mechanism is pinned by
+        // BoundaryAndValidationTest.approvedButNeverSettledHoldPersistsThroughWindowEnd.)
     }
 
     @Test
@@ -159,6 +162,39 @@ class EventStreamTest {
         assertEquals(aed("625.00"), closing(acc001, 3));
         assertEquals(aed("415.00"), closing(acc001, 4));
         assertEquals(aed("390.00"), closing(acc001, 5));
+    }
+
+    @Test
+    void e9ThenE10NonMonotonicProcessingDatesAreHandledInStreamOrder() {
+        // E9 (processing D6) precedes E10 (processing D5) in the stream: the
+        // processing-date sequence is non-monotonic. Requirements: stream
+        // order preserved, all value dates examined, no fee charged twice.
+        List<String> logOrder = result.log().events().stream()
+                .map(com.ledger.core.service.domain.event.EventEnvelope::eventId).toList();
+        assertTrue(logOrder.indexOf("E9") < logOrder.indexOf("E10"),
+                "stream order must be preserved over processing-date order");
+
+        // Every ACC-001 value date was examined; exactly the three negative
+        // ones were charged, each exactly once, all on the D5 evening (the
+        // only evening after E7's arrival; E10's late arrival adds nothing for
+        // ACC-001 and ACC-002 never goes negative).
+        assertEquals(3, result.feeTrace().size());
+        assertEquals(3, result.feeTrace().stream().map(f -> f.valueDate()).distinct().count());
+        assertTrue(result.feeTrace().stream()
+                .allMatch(f -> f.assessedOnDate().equals(day(5))));
+        assertTrue(result.feeTrace().stream()
+                .allMatch(f -> f.accountId().equals("ACC-001")));
+
+        // E10 was still applied (processing date moving backwards is not a
+        // skip): three D5-valued instalments exist and total exactly 10.000.
+        assertEquals(3, entriesOf("E10").size());
+        assertTrue(entriesOf("E10").stream().allMatch(e -> e.valueDate().equals(day(5))));
+
+        // Immutability after later events: replaying the same stream derives
+        // byte-identical entries (no duplicate fees, no reordering).
+        ReplayResult again = Scenario.replay();
+        assertEquals(result.entries(), again.entries());
+        assertEquals(result.feeTrace(), again.feeTrace());
     }
 
     @Test
