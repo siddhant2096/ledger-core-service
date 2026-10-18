@@ -45,11 +45,27 @@ E9 reverses E7; 10.000 in 3 instalments (E10).
 
 ## Implementation-choice constants
 
-### Horizon: 6 days
-- **Source**: implied requirement (report Days 1–6; interest capitalized end of Day 6).
-- **Why**: the evaluation window. Encoded as `Scenario.HORIZON_DAYS`.
+### Horizon: 6 days, mapped to business dates 2026-01-01 .. 2026-01-06
+- **Source**: the length (6 days) is an implied requirement (report Days 1–6;
+  interest capitalized end of Day 6). The concrete calendar dates are an
+  implementation choice: the engine works on relative windows, so any six
+  consecutive dates produce identical results. Encoded as `Scenario.WINDOW_START` /
+  `WINDOW_END`; `Scenario.day(n)` maps the spec's "Day n".
+- **Why**: the evaluation window is load-bearing for the scenario. Events with
+  dates outside the window are REJECTED (`EVENT_DATE_OUT_OF_HORIZON`,
+  AMBIGUITIES.md #24) because their postings would be invisible to fee and
+  interest derivation.
 - **Halving it** (3 days): no fees would ever be assessed (E7 arrives Day 5) and no
   interest capitalized — the window is load-bearing for the scenario.
+
+### Business time zone: UTC (`Scenario.BUSINESS_ZONE`)
+- **Source**: implementation choice. The engine requires an explicit `ZoneId`; it is
+  used only for deriving business dates from instants (`BusinessDates.businessDate`),
+  which the current date-only inputs never trigger.
+- **Why UTC**: neutral, no DST transitions, deterministic everywhere.
+- **Halving it**: not applicable to a zone. Choosing a different zone only matters
+  when instants are converted (same instant can map to different dates in different
+  zones — see `BusinessDatesTest`).
 
 ### Rounding mode: HALF_UP, only for rate multiplication
 - **Source**: implementation choice (spec requires "a consistent, explicit rounding

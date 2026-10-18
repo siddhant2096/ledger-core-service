@@ -159,3 +159,34 @@ Plan: (A) correctness fixes + reversal tests; (B) time-model migration + duplica
 event-id rejection + out-of-horizon validation + outcome keying by stream position;
 (C) documentation updates. Existing business rules (fee persistence, settlement
 policy, interest policy) are preserved — review found no contradiction.
+
+## 2026-10-18 17:44 IST — Stage A committed (861b31f)
+
+- Fixed the reversal state-poisoning bug: `reversedEventIds.add()` now happens only
+  AFTER successful validation and posting (validate-then-post-then-mark).
+- Added NON_POSITIVE_AMOUNT validation for Credit/Debit and
+  NON_POSITIVE_INSTALMENT_TOTAL for instalment credits.
+- New ReversalTest (8 tests): unknown-target poisoning regression, rejected-reversal
+  mutates nothing, duplicate reversal, cross-account reversal, reversal of
+  authorization/rejected events, reversal of derived fee ids, reversal-of-reversal,
+  multi-entry instalment reversal in full (single -10.000 compensation).
+- `mvn test`: 55 tests, 0 failures — BUILD SUCCESS.
+
+## 2026-10-18 18:00 IST — Stage B committed (4b51884)
+
+- Time model migrated: `EventEnvelope(eventId, streamPosition, processingDate,
+  valueDate, event)` — LocalDate processing/value dates + explicit 1-based stream
+  position. Specification Day n -> 2026-01-0n via `Scenario.day(n)`; window is
+  `Scenario.WINDOW_START..WINDOW_END`; engine takes an explicit `ZoneId`
+  (BUSINESS_ZONE = UTC) with `businessDate(Instant)` as the only sanctioned
+  Instant->date conversion (BusinessDates utility + BusinessDatesTest proving the
+  same instant maps to different dates in different zones).
+- Outcomes keyed by streamPosition (duplicate event ids can no longer overwrite each
+  other); duplicate event id -> DUPLICATE_EVENT_ID rejection; duplicate
+  streamPosition -> fail-fast IllegalArgumentException (data-contract violation).
+- Out-of-horizon processing/value dates -> EVENT_DATE_OUT_OF_HORIZON rejection.
+- ReportGenerator renders " DAY n (yyyy-MM-dd)" sections, date-labelled traces and
+  summaries; replay output figures unchanged (390.93 / 10.008 / fees 3x25 / 0.93 /
+  0.008) — verified by full run.
+- `mvn test`: 62 tests, 0 failures — BUILD SUCCESS. Intentional-failure test still
+  fails for its documented reason when run via its tag (250.00 vs 225.00).

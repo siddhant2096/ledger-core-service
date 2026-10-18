@@ -17,7 +17,7 @@ The event stream is replayable from scratch and every replay is byte-identical.
 ## Commands
 
 ```bash
-# Run the normal test suite (45 tests; the deliberately failing test is excluded)
+# Run the normal test suite (62 tests; the deliberately failing test is excluded)
 mvn test
 
 # Replay the full event stream and print the six-day report
@@ -70,11 +70,11 @@ Projection convention:
   * Rejected operations are printed as REJECTED with reasons.
 
 ----------------------------------------------------------------
- DAY 1
+ DAY 1 (2026-01-01)
 ----------------------------------------------------------------
  Events processed today:
-   E1 CREDIT AED 1200.00 (value day 1): ACCEPTED — Credit posted
-   E2 DEBIT AED 950.00 (value day 1): ACCEPTED — Debit posted
+   E1 CREDIT AED 1200.00 (value date 2026-01-01): ACCEPTED — Credit posted
+   E2 DEBIT AED 950.00 (value date 2026-01-01): ACCEPTED — Debit posted
  Account ACC-001 (AED)
    closing ledger balance (final projection): 250.00
      of which overdraft fees valued on/before today: 0.00
@@ -91,14 +91,14 @@ Projection convention:
    (none)
 
 ----------------------------------------------------------------
- DAY 2
+ DAY 2 (2026-01-02)
 ----------------------------------------------------------------
  Events processed today:
-   E3 AUTHORIZATION Auth-A hold AED 200.00 (value day 2): ACCEPTED — AUTH APPROVED: ledger=AED 250.00 activeHolds=AED 0.00 requested=AED 200.00
+   E3 AUTHORIZATION Auth-A hold AED 200.00 (value date 2026-01-02): ACCEPTED — AUTH APPROVED: ledger=AED 250.00 activeHolds=AED 0.00 requested=AED 200.00
  Account ACC-001 (AED)
    closing ledger balance (final projection): 225.00
      of which overdraft fees valued on/before today: -25.00
-   OVERDRAFT FEE assessed for today: 25.00 — balance before this fee was -370.00 (assessment ran on processing day 5)
+   OVERDRAFT FEE assessed for today: 25.00 — balance before this fee was -370.00 (assessment ran on processing date 2026-01-05)
    active holds: 200.00 (Auth-A)
    available balance: 25.00
    interest accrual for today: 0.09 (base 225.00 @ 0.0004 daily, positive balances only)
@@ -109,10 +109,10 @@ Projection convention:
    Auth-A (ACC-001): APPROVED (hold 200.00 active)
 
 ----------------------------------------------------------------
- DAY 3
+ DAY 3 (2026-01-03)
 ----------------------------------------------------------------
  Events processed today:
-   E4 CREDIT AED 400.00 (value day 3): ACCEPTED — Credit posted
+   E4 CREDIT AED 400.00 (value date 2026-01-03): ACCEPTED — Credit posted
  Account ACC-001 (AED)
    closing ledger balance (final projection): 625.00
    active holds: 200.00 (Auth-A)
@@ -121,15 +121,15 @@ Projection convention:
  ...
 
 ----------------------------------------------------------------
- DAY 4
+ DAY 4 (2026-01-04)
 ----------------------------------------------------------------
  Events processed today:
-   E5 SETTLEMENT Auth-A AED 185.00 (value day 4): ACCEPTED — Settlement posted; hold released (residual AED 15.00 released)
-   E6 SETTLEMENT Auth-Z AED 180.00 (value day 4): REJECTED — UNKNOWN_AUTHORIZATION: no authorization Auth-Z exists for account ACC-001
+   E5 SETTLEMENT Auth-A AED 185.00 (value date 2026-01-04): ACCEPTED — Settlement posted; hold released (residual AED 15.00 released)
+   E6 SETTLEMENT Auth-Z AED 180.00 (value date 2026-01-04): REJECTED — UNKNOWN_AUTHORIZATION: no authorization Auth-Z exists for account ACC-001
  Account ACC-001 (AED)
    closing ledger balance (final projection): 415.00
      of which overdraft fees valued on/before today: -50.00
-   OVERDRAFT FEE assessed for today: 25.00 — balance before this fee was -180.00 (assessment ran on processing day 5)
+   OVERDRAFT FEE assessed for today: 25.00 — balance before this fee was -180.00 (assessment ran on processing date 2026-01-05)
    active holds: 0.00
    available balance: 415.00
    interest accrual for today: 0.17 (base 415.00 @ 0.0004 daily, positive balances only)
@@ -138,16 +138,16 @@ Projection convention:
    Auth-A (ACC-001): PARTIALLY_SETTLED (settled 185.00 of 200.00; residual hold released)
 
 ----------------------------------------------------------------
- DAY 5
+ DAY 5 (2026-01-05)
 ----------------------------------------------------------------
  Events processed today:
-   E7 DEBIT AED 620.00 (value day 2): ACCEPTED — Debit posted
-   E8 AUTHORIZATION Auth-B hold AED 90.00 (value day 5): ACCEPTED — AUTH DECLINED: ledger=AED -155.00 activeHolds=AED 0.00 requested=AED 90.00
-   E10 INSTALMENT CREDIT BHD 10.000 in 3 parts (value day 5): ACCEPTED — Instalment credit posted in 3 parts: [BHD 3.333, BHD 3.333, BHD 3.334]
+   E7 DEBIT AED 620.00 (value date 2026-01-02): ACCEPTED — Debit posted
+   E8 AUTHORIZATION Auth-B hold AED 90.00 (value date 2026-01-05): ACCEPTED — AUTH DECLINED: ledger=AED -155.00 activeHolds=AED 0.00 requested=AED 90.00
+   E10 INSTALMENT CREDIT BHD 10.000 in 3 parts (value date 2026-01-05): ACCEPTED — Instalment credit posted in 3 parts: [BHD 3.333, BHD 3.333, BHD 3.334]
  Account ACC-001 (AED)
    closing ledger balance (final projection): 390.00
      of which overdraft fees valued on/before today: -75.00
-   OVERDRAFT FEE assessed for today: 25.00 — balance before this fee was -205.00 (assessment ran on processing day 5)
+   OVERDRAFT FEE assessed for today: 25.00 — balance before this fee was -205.00 (assessment ran on processing date 2026-01-05)
    active holds: 0.00
    available balance: 390.00
    interest accrual for today: 0.16 (base 390.00 @ 0.0004 daily, positive balances only)
@@ -159,10 +159,10 @@ Projection convention:
    Auth-B (ACC-001): DECLINED (no hold created)
 
 ----------------------------------------------------------------
- DAY 6
+ DAY 6 (2026-01-06)
 ----------------------------------------------------------------
  Events processed today:
-   E9 REVERSAL of E7 (value day 2): ACCEPTED — Reversal posted as compensation of E7
+   E9 REVERSAL of E7 (value date 2026-01-02): ACCEPTED — Reversal posted as compensation of E7
  Account ACC-001 (AED)
    closing ledger balance (final projection): 390.93
    interest accrual for today: 0.16 (base 390.00 @ 0.0004 daily, positive balances only)
@@ -175,28 +175,28 @@ Projection convention:
 ================================================================
  FEE ASSESSMENT TRACE (point-in-time view)
 ================================================================
- processing day 5: ACC-001 value day 2 pre-fee balance -370.00 -> fee 25.00 (value date = assessed day 2)
- processing day 5: ACC-001 value day 4 pre-fee balance -180.00 -> fee 25.00 (value date = assessed day 4)
- processing day 5: ACC-001 value day 5 pre-fee balance -205.00 -> fee 25.00 (value date = assessed day 5)
+ assessed on 2026-01-05: ACC-001 value date 2026-01-02 pre-fee balance -370.00 -> fee 25.00 (fee value date = assessed date 2026-01-02)
+ assessed on 2026-01-05: ACC-001 value date 2026-01-04 pre-fee balance -180.00 -> fee 25.00 (fee value date = assessed date 2026-01-04)
+ assessed on 2026-01-05: ACC-001 value date 2026-01-05 pre-fee balance -205.00 -> fee 25.00 (fee value date = assessed date 2026-01-05)
 
 ================================================================
- END-OF-WINDOW SUMMARY (after Day 6)
+ END-OF-WINDOW SUMMARY (after 2026-01-06)
 ================================================================
  ACC-001 (AED)
    final ledger balance:      390.93
    cumulative overdraft fees: -75.00
-   daily interest accruals:   D1=0.10, D2=0.09, D3=0.25, D4=0.17, D5=0.16, D6=0.16
+   daily interest accruals:   2026-01-01=0.10, 2026-01-02=0.09, 2026-01-03=0.25, 2026-01-04=0.17, 2026-01-05=0.16, 2026-01-06=0.16
    total interest capitalized: 0.93
  ACC-002 (BHD)
    final ledger balance:      10.008
    cumulative overdraft fees: 0.000
-   daily interest accruals:   D1=0.000, D2=0.000, D3=0.000, D4=0.000, D5=0.004, D6=0.004
+   daily interest accruals:   2026-01-01=0.000, 2026-01-02=0.000, 2026-01-03=0.000, 2026-01-04=0.000, 2026-01-05=0.004, 2026-01-06=0.004
    total interest capitalized: 0.008
  Final authorization states:
    Auth-A (ACC-001): PARTIALLY_SETTLED hold=200.00 settled=185.00
    Auth-B (ACC-001): DECLINED hold=90.00 settled=0.00
  Rejected operations:
-   E6 (processing day 4): UNKNOWN_AUTHORIZATION: no authorization Auth-Z exists for account ACC-001
+   E6 (processing date 2026-01-04): UNKNOWN_AUTHORIZATION: no authorization Auth-Z exists for account ACC-001
 ```
 
 (Elided lines marked `...` are zero-balance ACC-002 blocks and repeated authorization
@@ -256,19 +256,32 @@ src/main/java/com/ledger/core/service/
 ├── domain/
 │   ├── money/      CurrencyCode, Money (BigDecimal, fixed scale), CurrencyMismatchException
 │   ├── account/    Account (id, currency, opening balance)
-│   ├── event/      LedgerEvent (sealed), EventEnvelope (processingDay + valueDay)
+│   ├── event/      LedgerEvent (sealed), EventEnvelope (streamPosition, processingDate, valueDate)
 │   ├── entry/      LedgerEntry, EntryKind (derived postings)
 │   ├── auth/       Authorization, AuthorizationStatus (state machine)
 │   └── ledger/     EventLog (append-only)
 ├── application/
 │   ├── LedgerEngine        deterministic replay, fees, interest
 │   ├── InstalmentAllocator exact minor-unit split
+│   ├── BusinessDates       explicit-zone Instant→LocalDate derivation, date ranges
 │   ├── ReplayResult        all derived state from one replay
 │   ├── ReportGenerator     the printable report
 │   └── Scenario            the exact E1..E10 stream (shared with tests)
 └── Main.java               replays and prints
 src/test/java/com/ledger/core/service/
-├── MoneyTest, InstalmentAllocatorTest, ReplayTest,
-├── BoundaryAndValidationTest, ReportTest
+├── MoneyTest, InstalmentAllocatorTest, ReplayTest, ReversalTest,
+├── BoundaryAndValidationTest, ReportTest, BusinessDatesTest
 └── IntentionalFailureTest  (@Tag("intentional-failure"), excluded by default)
 ```
+
+## Time model
+
+Each event carries a `long streamPosition` (authoritative ordering + outcome key), a
+`LocalDate processingDate` (drives evening fee assessment and authorization
+decisions), and a `LocalDate valueDate` (drives balances, fee value dates, interest
+bases). The specification's "Day n" maps to `2026-01-0n` (`Scenario.day(n)`); the
+choice of concrete dates is arbitrary and produces identical results for any six
+consecutive dates. `Instant occurredAt/receivedAt` are deliberately not modeled (the
+input has none; no rule consumes them — see AMBIGUITIES.md #23); when ingestion gains
+instants, they must be converted via the engine's explicit `ZoneId`
+(`LedgerEngine.businessDate`), never the JVM default zone.

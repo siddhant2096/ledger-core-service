@@ -315,13 +315,113 @@ a documented, defensible decision.
 2. **Chosen policy**: only financial postings (POSTING, INSTALMENT_POSTING) are
    reversible; the compensation is the negated SUM of the target event's entries (so a
    multi-part event is compensated in full, as one entry). Reversing a fee or interest
-   entry is REJECTED (`REVERSAL_UNSUPPORTED_TARGET`).
+   entry is REJECTED (`REVERSAL_UNSUPPORTED_TARGET`). Reversal-of-a-reversal is
+   REJECTED the same way (a compensation entry is not a POSTING). Reversing a rejected
+   event or an authorization (neither derives entries) lands on
+   `REVERSAL_TARGET_UNKNOWN` — consistent with "rejected means it did not happen".
 3. **Why**: authorizations are lifecycle objects, not amounts — "reversing" one is a
    release/cancel concept the spec does not define; fees/interest are derived and must
    be corrected by explicit business events, not raw reversal.
 4. **Alternative**: allow reversing anything including derived entries — would let
-   callers bypass the fee-persistence policy by hand.
+   callers bypass the fee-persistence policy by hand. Also considered: per-entry
+   compensation for multi-part events (3 separate compensations for an instalment
+   credit) — rejected in favour of one sum-compensation because the reversal event
+   carries a single value date and the sum is exactly conserved either way; one entry
+   keeps the books cleaner.
 5. **Consequence**: E9 (targeting E7, a simple DEBIT) compensates exactly −620.00 →
-   +620.00.
-6. **Test**: `BoundaryAndValidationTest.reversalOfUnknownTargetIsRejected`,
-   `duplicateReversalIsRejected`.
+   +620.00; reversing E10 would compensate exactly −10.000 BHD.
+6. **Test**: `ReversalTest` (all eight cases), including
+   `multiEntryInstalmentCreditIsReversedInFullAsOneCompensation`,
+   `reversalOfAReversalIsRejected`, `reversingDerivedFeeEntriesIsUnsupported`,
+   `crossAccountReversalIsRejected`.
+
+## 22. When is reversal state mutated? (ordering of validation vs state update)
+
+1. **Ambiguity**: is the target id marked "reversed" when the reversal is RECEIVED or
+   when it has been validated and posted?
+2. **Chosen policy**: validate-then-post-then-mark. The duplicate-protection set is
+   updated only after the compensation entry is appended; a rejected reversal mutates
+   nothing.
+3. **Why**: the original implementation marked the id first — a failed reversal of a
+   not-yet-existing target poisoned the id, and a later legitimate reversal (after the
+   real event arrived) was wrongly rejected as DUPLICATE_REVERSAL. State that records
+   "X has been reversed" must only ever describe successful reversals.
+4. **Alternative**: keep a separate "attempted" set — adds state without value; the
+   only meaningful fact is "successfully reversed".
+5. **Consequence**: idempotent and order-safe reversals; see the regression test.
+6. **Test**: `ReversalTest.failedReversalOfUnknownTargetDoesNotPoisonTheTargetId`,
+   `rejectedReversalMutatesNothing`.
+
+## 23. Time model: days as ints, LocalDate, or Instant?
+
+1. **Ambiguity**: the spec speaks of "Day 1..6" — integer ordinals, calendar dates,
+   or timestamps?
+2. **Chosen policy** (updated 2026-10-18): `LocalDate processingDate` +
+   `LocalDate valueDate` + `long streamPosition` on every envelope; a configured
+   `ZoneId` on the engine is the ONLY sanctioned Instant→date conversion
+   (`BusinessDates.businessDate`). `Instant occurredAt/receivedAt` are deliberately
+   NOT modeled: the input stream carries no instants and no business rule consumes
+   them, so adding them would fabricate data. Specification "Day n" maps to
+   2026-01-0n (arbitrary but fixed; any six consecutive dates give identical results).
+3. **Why**: `LocalDate` is the honest granularity (all rules are per business day),
+   immune to DST/zone ambiguity; `streamPosition` separates ORDERING (a stream
+   concern) from TIME (a business concern); the explicit zone prevents
+   machine-dependent replays.
+4. **Alternatives**: (a) keep ints — simple but conflates "day number" with "date"
+   and cannot express real calendars; (b) `LocalDateTime`/Instant for everything —
+   false precision, DST/zone hazards, ordering-by-clock bugs; (c) full
+   occurredAt/receivedAt/processingDate/valueDate — rejected as redundant for this
+   input set (documented, not forgotten: add them when ingestion actually has them).
+5. **Consequence**: reports show real dates (" DAY 2 (2026-01-02)"); fee/entry ids
+   embed ISO dates; replay stays byte-deterministic.
+6. **Test**: `BusinessDatesTest` (zone behaviour, inclusive ranges),
+   `ReplayTest.allTenEventsAreInTheLogInStreamOrder` (positions 1..10).
+
+## 24. Events whose dates fall outside the configured window
+
+1. **Ambiguity**: accept or reject an event whose processing date or value date lies
+   outside [windowStart, windowEnd]?
+2. **Chosen policy**: REJECT with `EVENT_DATE_OUT_OF_HORIZON`.
+3. **Why**: an accepted posting valued outside the window would be invisible to fee
+   assessment (which covers window dates up to the processing date) and to interest
+   (window dates only) — silently inconsistent books. Loud rejection surfaces a data
+   problem at ingestion.
+4. **Alternative**: widen the window implicitly — hides configuration errors; clamp
+   the value date into the window — falsifies accounting dates.
+5. **Consequence**: callers must configure the window to cover all known events; the
+   scenario window 2026-01-01..2026-01-06 covers E1..E10 exactly.
+6. **Test**: `BoundaryAndValidationTest.eventDatesOutsideTheWindowAreRejected`.
+
+## 25. Duplicate event ids (ingestion idempotency)
+
+1. **Ambiguity**: what happens if two envelopes share an event id?
+2. **Chosen policy**: the first occurrence is processed normally; subsequent
+   envelopes with the same id are REJECTED with `DUPLICATE_EVENT_ID` (no entries, no
+   state change). Outcomes are keyed by `streamPosition` so both outcomes survive.
+   Duplicate `streamPosition` values are a data-contract violation and fail fast
+   (`IllegalArgumentException`) — positions are the pipeline's ordering key.
+3. **Why**: real feeds redeliver; idempotent ingestion requires exactly-once effect.
+   Silently double-posting would corrupt balances; silently overwriting the first
+   outcome would corrupt the audit trail.
+4. **Alternative**: reject the whole stream on any duplicate — too coarse; the
+   duplicate is the anomaly, not the stream.
+5. **Consequence**: replays of the same logical event are safe; redelivered events
+   are visible as rejections in the report.
+6. **Test**: `BoundaryAndValidationTest.duplicateEventIdIsRejectedAndKeepsBothOutcomes`,
+   `duplicateStreamPositionIsADataContractViolation`.
+
+## 26. Can Credit/Debit carry a zero or negative amount?
+
+1. **Ambiguity**: is `Credit(-50.00)` a debit?
+2. **Chosen policy**: REJECT with `NON_POSITIVE_AMOUNT`. The direction of money flow
+   comes from the event TYPE, never from a sign smuggled into the amount. Zero-total
+   instalment credits are likewise rejected (`NON_POSITIVE_INSTALMENT_TOTAL`).
+3. **Why**: signed amounts flowing through typed events makes every posting's
+   direction auditable at the type level and prevents double-negation bugs (a negative
+   Debit would negate to a credit).
+4. **Alternative**: accept and normalize negative amounts to the opposite event type —
+   silently changes the input; hides upstream bugs.
+5. **Consequence**: malformed events surface as rejections instead of inverted
+   postings.
+6. **Test**: `BoundaryAndValidationTest.negativeAndZeroAmountsAreRejected`,
+   `zeroTotalInstalmentCreditIsRejected`.

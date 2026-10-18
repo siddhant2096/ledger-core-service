@@ -66,6 +66,52 @@ Two timelines are kept strictly separate:
 The report's per-day balances are end-of-window value-date projections; the fee trace
 section shows the point-in-time view (what was knowable when each assessment ran).
 
+## Time model
+
+Every `EventEnvelope` carries three explicit time/order concepts (AMBIGUITIES.md #23):
+
+| Field | Type | Meaning |
+|---|---|---|
+| `streamPosition` | `long` | Stable 1-based stream position. The authoritative ordering key and the unique key for outcomes. Duplicate positions are a data-contract violation (fail fast). |
+| `processingDate` | `LocalDate` | The business date the ledger processes the event. Drives evening boundaries (fee assessment) and authorization decisions. |
+| `valueDate` | `LocalDate` | The business date the derived postings belong to. Drives balances, fee value dates, interest bases. May precede the processing date (late/back-valued) or follow it (forward-dated). |
+
+Deliberately absent: `Instant occurredAt`/`receivedAt` — the input stream carries no
+instants and no rule consumes them; adding them would fabricate data. When ingestion
+gains real timestamps, they must be converted through the engine's configured
+`ZoneId` (`LedgerEngine.businessDate(Instant)` → `BusinessDates.businessDate`),
+never the JVM default zone; equal instants tie-break by `streamPosition`, never by
+the clock. The specification's "Day n" maps to `2026-01-0n` (`Scenario.day(n)`);
+any six consecutive dates produce byte-identical results because all rules are
+relative to the window, not to a calendar.
+
+Events are applied **strictly in stream order** — never sorted by value date.
+An event whose processing date is earlier than one already seen (E10 follows E9:
+processing date 2026-01-05 after 2026-01-06) is still applied in stream order and
+its effects are picked up by the next evening assessment; this is deterministic
+because the stream is fixed. Evening fee assessment runs when the processing date
+*advances* (and once at window end); interest capitalization runs last, at window
+end. A rejected event derives nothing — no entries, no holds, no state.
+
+## Performance notes
+
+Complexity (E = entries, D = window days, A = accounts):
+
+- `closingBalance`: O(E) per call — a full scan of the entry list.
+- `assessFees` per evening: O(A · D · E); over a full replay O(A · D² · E) worst case.
+- `capitalizeInterest`: O(A · D · E).
+- Authorization decision: O(E) (one `closingBalance` call).
+
+For this window (A=2, D=6, E≈14) that is trivially fast, so **no index, projection
+cache, or snapshot was added**: any cached per-day projection would need careful
+invalidation for late value-dated events — exactly the trap the deliberately failing
+test demonstrates. If the window grows (thousands of days/entries), the safe upgrade
+is a per-account, value-date-ordered entry index (e.g. `NavigableMap<LocalDate,
+Money>` of daily deltas with a running Fenwick/tree sum), rebuilt or
+incrementally extended on each append; correctness must be proven against the
+same test suite, which asserts final balances derived only from the append-only
+entry list.
+
 ## Authorization state machine and active-hold calculation
 
 ```
@@ -203,8 +249,9 @@ cross-currency arithmetic is impossible rather than merely guarded against.
   (with idempotent consumer keys), optimistic/pessimistic concurrency on account
   aggregates, and snapshotting for long streams (snapshots must be invalidated for
   historical value days — the trap the intentional-failure test demonstrates).
-- **No calendar model**: "day" is an integer; production needs business calendars,
-  time zones, and cut-off times.
+- **No calendar model**: business dates are bare `LocalDate`s; production needs
+  holiday calendars, cut-off times, and (when ingesting real-time events) the
+  `occurredAt`/`receivedAt` instants the envelope deliberately omits today.
 - **Fee policy is minimal**: no fee caps, no fee-on-fee compounding rules beyond the
   documented one, no fee refunds/waivers (would be explicit events).
 - **Interest**: no day-count conventions (ACT/360 etc.), no tiered/negative rates,
