@@ -44,15 +44,18 @@ remains. Proven by `ReplayTest.e9CompensatesE7ExactlyWithoutDeletingIt`.
 1. Apply events **strictly in stream order** (the specification's "precise
    processing order"; same-day order = stream order). Each event is validated and
    either derives entries or is recorded as rejected.
-2. When the processing day advances, run the **evening fee assessment** for every
-   completed day; after the stream, run it for the remaining days up to the horizon.
-3. Last, **capitalize interest** (end of Day 6).
+2. When the processing date advances, run the **evening fee reconciliation** for
+   every completed date; after the stream, run it for the remaining dates up to the
+   window end. Reconciliation charges newly negative account-dates and appends
+   FEE_REVERSAL compensations for charged dates no longer overdrawn.
+3. Last, **capitalize interest** (end of the window).
 
-`closingBalance(entries, account, day)` = opening balance + Σ entries for the account
-with `valueDay ≤ day`. Because entries carry value days, a late event (E7: processed
-Day 5, valued Day 2) changes the Day-2 closing in the final projection. This is the
-replay-correctness property the deliberately failing test demonstrates from the
-negative side.
+`closingBalance(entries, account, date)` = opening balance + Σ entries for the
+account with `valueDate ≤ date`. Because entries carry value dates, a late event
+(E7: processed Day 5, valued Day 2) changes the Day-2 closing in the final
+projection, and a late derived compensation (FEE_REVERSAL derived Day 6, valued
+Day 2) does the same for fee effects — the property the deliberately failing test
+demonstrates from the negative side.
 
 ## Processing order vs value-date ordering
 
@@ -98,7 +101,7 @@ end. A rejected event derives nothing — no entries, no holds, no state.
 Complexity (E = entries, D = window days, A = accounts):
 
 - `closingBalance`: O(E) per call — a full scan of the entry list.
-- `assessFees` per evening: O(A · D · E); over a full replay O(A · D² · E) worst case.
+- `reconcileFees` per evening: O(A · D · E); over a full replay O(A · D² · E) worst case.
 - `capitalizeInterest`: O(A · D · E).
 - Authorization decision: O(E) (one `closingBalance` call).
 
@@ -156,29 +159,38 @@ in the same processing step. An invalid settlement creates **no** entry and cons
 - Only financial postings (POSTING / INSTALMENT_POSTING) are reversible; reversing a
   fee or an unknown id is rejected.
 - Effect on history: because the compensation carries E9's value date (Day 2), the
-  pre-fee Day-2 balance returns to exactly its pre-E7 value (250.00). Assessed fees
-  are **not** removed (see below), so the post-fee Day-2 closing is 225.00.
+  pre-fee Day-2 balance returns to exactly its pre-E7 value (250.00). The fees E7
+  triggered are not erased either — each is neutralized by an append-only
+  FEE_REVERSAL entry (see below), so the net Day-2 fee effect is 0.00 while the
+  full charge+compensation history stays in the entry list.
 
-## Fee assessment idempotency and interaction with historical value dates
+## Fee reconciliation, idempotency, and interaction with historical value dates
 
-- Each evening (processing date D), every account's value dates `windowStart..D` are
-  examined in ascending order. A date whose **pre-fee** closing balance (which
-  includes previously derived fee entries) is negative earns exactly one fee from the
-  **explicit per-currency fee schedule** injected into the engine
-  (`Scenario.OVERDRAFT_FEE_SCHEDULE`; default: ONLY the supplied AED 25.00 — no BHD
-  fee is configured because no requirement authorizes one). A currency missing from
-  the schedule yields a recorded `SkippedFeeAssessment` and no entry — fees are
-  never charged cross-currency and never skipped silently. Fee entries carry
-  `valueDate = assessed date`, `derivedOnDate = D` (the discovery date, which can be
-  later than the value date when a late back-valued event reveals the overdraft;
-  the report prints both explicitly).
-- Idempotency key: `(accountId, valueDay)`, marked **only when a fee is actually
-  charged**. Non-negative days are re-examined on later evenings, which is what lets
-  E7 (arriving Day 5) retroactively create a Day-2 fee — exactly once
-  (`exactlyOneFeePerNegativeAccountDayWithAssessedDayValueDate`).
-- Fees are never retroactively removed: E9 restores the underlying Day-2 balance but
-  the Day-2 fee stands (`e9DoesNotRemoveAssessedFees`). Refunding would be a separate
-  explicit business event, not a rewrite.
+- At each boundary (evening of a completed processing date, and once at window end),
+  the engine **reconciles** fees per account: it recomputes the desired fee set from
+  scratch over all NON-fee entries (POSTING / INSTALMENT_POSTING /
+  REVERSAL_COMPENSATION), walking value dates in ascending order with each desired
+  fee participating in later dates' bases (sequential pre-fee semantics,
+  AMBIGUITIES.md #1).
+- A desired, never-charged date is charged exactly once from the **explicit
+  per-currency fee schedule** (`Scenario.OVERDRAFT_FEE_SCHEDULE`; default: ONLY the
+  supplied AED 25.00 — no BHD fee is configured because no requirement authorizes
+  one). A currency missing from the schedule yields a recorded
+  `SkippedFeeAssessment` and no entry — fees are never charged cross-currency and
+  never skipped silently. Fee entries carry `valueDate = assessed date`,
+  `derivedOnDate = D` (the discovery date, which can be later than the value date
+  when a late back-valued event reveals the overdraft; the report prints both).
+- A charged date no longer overdrawn in the corrected books is **compensated**: an
+  append-only `FEE_REVERSAL` entry of opposite sign, valued on the ORIGINAL fee's
+  value date, derived on the boundary date. Original fee entries are never mutated
+  or deleted. Each date is charged at most once and compensated at most once; a
+  compensated date is never re-charged (AMBIGUITIES.md #28).
+- Idempotency keys: `(accountId, valueDate)` for charges and compensations.
+  Non-negative dates are re-examined at every boundary, which is what lets E7
+  (arriving Day 5) retroactively create a Day-2 fee — exactly once — and lets E9
+  (Day 6) trigger its compensation
+  (`exactlyOneFeePerNegativeAccountDayWithAssessedDayValueDate`,
+  `e9LeavesFeeEntriesIntactAndCompensatesThem`).
 
 ## Interest calculation, rounding, and capitalization
 
@@ -187,8 +199,10 @@ in the same processing step. An invalid settlement creates **no** entry and cons
 - The capitalized credit (Day 6, value date Day 6) is **defined as** the exact sum of
   the rounded daily accruals, so the sum always equals the capitalized total and no
   remainder exists to discard (`capitalizedInterestEqualsSumOfRoundedDailyAccrualsExactly`).
-- Because fees and reversals are value-dated entries, they automatically flow into
-  interest bases: Day-2 base is 225.00 (post-fee), not 250.00.
+- Because fees, fee compensations, and reversals are value-dated entries, they
+  automatically flow into interest bases. In this scenario all fees are compensated,
+  so bases equal the no-fee balances (Day-2 base 250.00); where a fee remains
+  effective at window end it flows into later bases (see `LateEventFeeTest`).
 
 ## Currency-safe decimal arithmetic
 
@@ -207,8 +221,9 @@ cross-currency arithmetic is impossible rather than merely guarded against.
 | AED=2dp, BHD=3dp; exact decimal arithmetic | `MoneyTest` |
 | Money conservation in instalments (Σ parts = total exactly) | `InstalmentAllocatorTest`, `bhdInstalmentsConserveExactlyTenBhd` |
 | Event log append-only | `eventLogIsAppendOnly` |
-| Late value-dated events rewrite history without mutation | `e7RewritesDay2HistoryWithoutTouchingTheStream`, `IntentionalFailureTest` (negative proof) |
-| ≤ 1 fee per account-day; fee value date = assessed day | `exactlyOneFeePerNegativeAccountDayWithAssessedDayValueDate`, `negativeBalanceEarnsNoInterest` |
+| Late value-dated events rewrite history without mutation | `e7RewritesDay2HistoryWithoutTouchingTheStream` |
+| Derived entries are immutable but their effect is compensatable | `IntentionalFailureTest` (negative proof), `e9LeavesFeeEntriesIntactAndCompensatesThem` |
+| ≤ 1 fee per account-day; fee value date = assessed day | `exactlyOneFeePerNegativeAccountDayWithAssessedDayValueDate` (value/derived dates), `negativeBalanceEarnsNoInterest` (idempotency across evenings: 6 negative days → exactly 6 distinct-dated fees), `LateEventFeeTest` (charge-once/compensate-once) |
 | Positive-balance-only interest; Σ daily accruals = capitalized total | `interestAccruesOnPositivePostFeeBalancesOnly`, `capitalizedInterestEqualsSumOfRoundedDailyAccrualsExactly` |
 | Unknown/excess/duplicate settlements post nothing and consume nothing | `authZSettlementIsRejectedAndPostsNothing`, `excessSettlementIsRejectedAndHoldSurvives`, `secondSettlementOfSameAuthorizationIsRejected` |
 | Duplicate reversal rejected | `duplicateReversalIsRejected` |
@@ -217,13 +232,19 @@ cross-currency arithmetic is impossible rather than merely guarded against.
 
 ## Alternatives considered (with trade-offs)
 
-1. **Fee lifecycle: point-in-time assessment, fees persist (CHOSEN)** vs *full
-   recompute on every replay*. Chosen because accounting systems do not erase
-   assessed charges — a fee legitimately assessed against the books as known stands,
-   and a correction is a new event. Trade-off: final balances differ from a
-   "clean-slate" recompute (criterion 6 fails), and downstream consumers must
-   understand that fees are sticky. Recompute would be simpler to reason about but
-   makes fee income depend on event arrival order and erases audit history.
+1. **Fee lifecycle: boundary-time assessment with append-only compensation
+   (CHOSEN, final review)** vs *fees persist forever once assessed* vs *full
+   recompute on every replay*. The engine assesses at processing-time boundaries
+   (so the point-in-time audit trail exists), and reconciles at each boundary by
+   appending FEE_REVERSAL compensation entries for charges the corrected books no
+   longer support (so criterion 6 holds in net terms and fee income follows the
+   corrected books rather than event arrival order). *Persist-forever* (the policy
+   implemented in phases 1–7) keeps the charge history but fails criterion 6 and
+   retains fees for overdrafts the corrected books say never happened.
+   *Full recompute* satisfies criterion 6 but discards the point-in-time assessment
+   trail the assignment's "derived accounting entry" framing calls for. Trade-off of
+   the chosen policy: fee entries are immutable but their EFFECT is not permanent,
+   so consumers must read fees net of compensations (the report prints both).
 2. **Authorization validation against processing-time books (CHOSEN)** vs *against
    the final value-date projection* or *against the authorization's value date*.
    Processing-time books is the only option that is causally consistent (you cannot
@@ -239,7 +260,7 @@ cross-currency arithmetic is impossible rather than merely guarded against.
 4. **Capitalized interest = Σ rounded daily accruals (CHOSEN)** vs *round the
    aggregate and allocate the residual to the last day*. Chosen because it makes the
    identity Σ = capitalized exact by construction and matches per-day statements.
-   On this dataset the alternatives genuinely differ (0.93 vs 0.92 for ACC-001), so
+   On this dataset the alternatives genuinely differ (1.03 vs 1.02 for ACC-001), so
    the choice is observable, not cosmetic.
 5. **Rejected events stay in the log with derived REJECTED outcomes (CHOSEN)** vs
    *excluding them from the log*. Keeping them preserves the complete audit trail and

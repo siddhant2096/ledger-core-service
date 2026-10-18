@@ -17,15 +17,18 @@ mean, and whether it is a **supplied requirement** or an **implementation choice
   decision.
 - **Why appropriate**: AED 25.00 is the contract value; everything else is
   configuration rather than code.
-- **Halving it** (12.50): would halve overdraft revenue and change every fee line and
-  the final ACC-001 balance (390.93 → 428.43). Meaningful change, wrong contract.
+- **Halving it** (12.50): would halve every fee and compensation line in the trace
+  (−12.50/+12.50 instead of −25.00/+25.00). In THIS scenario the final ACC-001
+  balance is unchanged (466.03) because all three fees are compensated after E9 —
+  the fee amount moves the final balance only when a window ends with an effective
+  (uncompensated) fee. Meaningful change, wrong contract.
 
 ### Daily interest rate: 0.0004 (0.04%)
 - **Source**: supplied requirement.
 - **Why appropriate**: contract value; encoded once as `LedgerEngine.DAILY_RATE`.
   Applied as exact decimal multiplication, rounded HALF_UP to currency scale.
-- **Halving it** (0.0002): halves all accruals; e.g. Day-3 accrual 625.00 × 0.0002 =
-  0.1250 → 0.13 (HALF_UP) vs 0.25 today; capitalized total becomes 0.47 for ACC-001.
+- **Halving it** (0.0002): halves all accruals; e.g. Day-3 accrual 650.00 × 0.0002 =
+  0.1300 → 0.13 (HALF_UP) vs 0.26 today; capitalized total becomes 0.51 for ACC-001.
   Meaningful, and not the contract.
 
 ### Currency decimal scales: AED = 2, BHD = 3
@@ -85,7 +88,7 @@ E9 reverses E7; 10.000 in 3 instalments (E10).
 ### Interest reconciliation: capitalized total = Σ rounded daily accruals
 - **Source**: implementation choice (spec demands exact equality and no discarded
   remainder; this policy achieves it by construction).
-- **Consequence on this dataset**: ACC-001 0.93 (vs 0.92 if the aggregate were rounded
+- **Consequence on this dataset**: ACC-001 1.03 (vs 1.02 if the aggregate were rounded
   — an observable difference, documented in REJECTED.md #8).
 - **Halving it**: not applicable; it is a rule, not an amount.
 
@@ -118,6 +121,7 @@ E9 reverses E7; 10.000 in 3 instalments (E10).
   excess settlement, duplicate settlement/reversal, BHD fee currency). They are
   assumptions about *rule boundaries*, not about the E1..E10 scenario; each test
   comment derives its expected value from these inputs.
-- `IntentionalFailureTest`: compares Day-2 closing 250.00 (as knowable at end of
-  Day 2) vs 225.00 (final projection). Both numbers are derived from the stream, and
-  their difference is the demonstrated lesson.
+- `IntentionalFailureTest`: compares the Day-2 net fee effect as of the Day-5
+  evening (−25.00, stream without E9) with the final one (0.00, after the Day-6
+  compensation). Both numbers are derived from the stream; their difference is the
+  demonstrated lesson (immutable entries, compensatable effects).

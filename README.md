@@ -39,11 +39,14 @@ position) and a *value day* (accounting date). Events never change once appended
 accounting effects are derived **ledger entries** carrying a value day; balances are
 computed from entries filtered by value day, so a late event (E7: processed Day 5,
 valued Day 2) rewrites historical projections without touching history. Each evening,
-every not-yet-fee-assessed value day whose pre-fee closing balance is negative earns
-exactly one overdraft fee (25.00 in the account's own currency, value date = assessed
-day); fee entries are immutable once derived. Interest accrues daily on positive
-post-fee balances at 0.0004, rounded HALF_UP to the currency's scale, and the exact
-sum of the rounded daily accruals is capitalized as one credit on Day 6. Settlements
+the engine reconciles overdraft fees: every never-charged value date whose pre-fee
+closing balance is negative earns exactly one fee (25.00, AED only in the default
+schedule, value date = assessed date), and every previously charged date that is no
+longer overdrawn in the corrected books (e.g. after E9 reverses E7) receives an
+append-only FEE_REVERSAL compensation entry — the original fee entry is never
+mutated or deleted. Interest accrues daily on positive post-fee balances at 0.0004,
+rounded HALF_UP to the currency's scale, and the exact sum of the rounded daily
+accruals is capitalized as one credit on Day 6. Settlements
 are validated against their authorization (unknown/excess/duplicate ⇒ REJECTED, no
 posting); reversals are new compensating entries (duplicate reversal ⇒ REJECTED);
 the BHD 10.000 credit is split 3.333 / 3.333 / 3.334 (residual minor unit to the last
@@ -96,12 +99,13 @@ Projection convention:
  Events processed today:
    E3 AUTHORIZATION Auth-A hold AED 200.00 (value date 2026-01-02): ACCEPTED — AUTH APPROVED: ledger=AED 250.00 activeHolds=AED 0.00 requested=AED 200.00
  Account ACC-001 (AED)
-   closing ledger balance (final projection): 225.00
-     of which overdraft fees valued on/before today: -25.00
+   closing ledger balance (final projection): 250.00
+     of which overdraft fees valued on/before today: 0.00
    OVERDRAFT FEE with value date today: 25.00 — pre-fee balance was -370.00; fee first discovered and posted on processing date 2026-01-05
+   OVERDRAFT FEE COMPENSATED with value date today: +25.00 — original fee entry retained; compensated on processing date 2026-01-06
    active holds: 200.00 (Auth-A)
-   available balance: 25.00
-   interest accrual for today: 0.09 (base 225.00 @ 0.0004 daily, positive balances only)
+   available balance: 50.00
+   interest accrual for today: 0.10 (base 250.00 @ 0.0004 daily, positive balances only)
  Account ACC-002 (BHD)
    closing ledger balance (final projection): 0.000
    ...
@@ -114,10 +118,10 @@ Projection convention:
  Events processed today:
    E4 CREDIT AED 400.00 (value date 2026-01-03): ACCEPTED — Credit posted
  Account ACC-001 (AED)
-   closing ledger balance (final projection): 625.00
+   closing ledger balance (final projection): 650.00
    active holds: 200.00 (Auth-A)
-   available balance: 425.00
-   interest accrual for today: 0.25 (base 625.00 @ 0.0004 daily, positive balances only)
+   available balance: 450.00
+   interest accrual for today: 0.26 (base 650.00 @ 0.0004 daily, positive balances only)
  ...
 
 ----------------------------------------------------------------
@@ -127,12 +131,13 @@ Projection convention:
    E5 SETTLEMENT Auth-A AED 185.00 (value date 2026-01-04): ACCEPTED — Settlement posted; hold released (residual AED 15.00 released)
    E6 SETTLEMENT Auth-Z AED 180.00 (value date 2026-01-04): REJECTED — UNKNOWN_AUTHORIZATION: no authorization Auth-Z exists for account ACC-001
  Account ACC-001 (AED)
-   closing ledger balance (final projection): 415.00
-     of which overdraft fees valued on/before today: -50.00
+   closing ledger balance (final projection): 465.00
+     of which overdraft fees valued on/before today: 0.00
    OVERDRAFT FEE with value date today: 25.00 — pre-fee balance was -180.00; fee first discovered and posted on processing date 2026-01-05
+   OVERDRAFT FEE COMPENSATED with value date today: +25.00 — original fee entry retained; compensated on processing date 2026-01-06
    active holds: 0.00
-   available balance: 415.00
-   interest accrual for today: 0.17 (base 415.00 @ 0.0004 daily, positive balances only)
+   available balance: 465.00
+   interest accrual for today: 0.19 (base 465.00 @ 0.0004 daily, positive balances only)
  ...
  Authorization states (end of day):
    Auth-A (ACC-001): PARTIALLY_SETTLED (settled 185.00 of 200.00; residual hold released)
@@ -145,12 +150,13 @@ Projection convention:
    E8 AUTHORIZATION Auth-B hold AED 90.00 (value date 2026-01-05): ACCEPTED — AUTH DECLINED: ledger=AED -155.00 activeHolds=AED 0.00 requested=AED 90.00
    E10 INSTALMENT CREDIT BHD 10.000 in 3 parts (value date 2026-01-05): ACCEPTED — Instalment credit posted in 3 parts: [BHD 3.333, BHD 3.333, BHD 3.334]
  Account ACC-001 (AED)
-   closing ledger balance (final projection): 390.00
-     of which overdraft fees valued on/before today: -75.00
+   closing ledger balance (final projection): 465.00
+     of which overdraft fees valued on/before today: 0.00
    OVERDRAFT FEE with value date today: 25.00 — pre-fee balance was -205.00; fee first discovered and posted on processing date 2026-01-05
+   OVERDRAFT FEE COMPENSATED with value date today: +25.00 — original fee entry retained; compensated on processing date 2026-01-06
    active holds: 0.00
-   available balance: 390.00
-   interest accrual for today: 0.16 (base 390.00 @ 0.0004 daily, positive balances only)
+   available balance: 465.00
+   interest accrual for today: 0.19 (base 465.00 @ 0.0004 daily, positive balances only)
  Account ACC-002 (BHD)
    closing ledger balance (final projection): 10.000
    interest accrual for today: 0.004 (base 10.000 @ 0.0004 daily, positive balances only)
@@ -164,9 +170,9 @@ Projection convention:
  Events processed today:
    E9 REVERSAL of E7 (value date 2026-01-02): ACCEPTED — Reversal posted as compensation of E7
  Account ACC-001 (AED)
-   closing ledger balance (final projection): 390.93
-   interest accrual for today: 0.16 (base 390.00 @ 0.0004 daily, positive balances only)
-   INTEREST CAPITALIZED today: 0.93 (sum of rounded daily accruals)
+   closing ledger balance (final projection): 466.03
+   interest accrual for today: 0.19 (base 465.00 @ 0.0004 daily, positive balances only)
+   INTEREST CAPITALIZED today: 1.03 (sum of rounded daily accruals)
  Account ACC-002 (BHD)
    closing ledger balance (final projection): 10.008
    INTEREST CAPITALIZED today: 0.008 (sum of rounded daily accruals)
@@ -178,18 +184,21 @@ Projection convention:
  assessed on 2026-01-05: ACC-001 value date 2026-01-02 pre-fee balance -370.00 -> fee 25.00 (fee value date = assessed date 2026-01-02)
  assessed on 2026-01-05: ACC-001 value date 2026-01-04 pre-fee balance -180.00 -> fee 25.00 (fee value date = assessed date 2026-01-04)
  assessed on 2026-01-05: ACC-001 value date 2026-01-05 pre-fee balance -205.00 -> fee 25.00 (fee value date = assessed date 2026-01-05)
+ compensated on 2026-01-06: ACC-001 value date 2026-01-02 -> fee reversal +25.00 (original fee entry retained; corrected books show no overdraft)
+ compensated on 2026-01-06: ACC-001 value date 2026-01-04 -> fee reversal +25.00 (original fee entry retained; corrected books show no overdraft)
+ compensated on 2026-01-06: ACC-001 value date 2026-01-05 -> fee reversal +25.00 (original fee entry retained; corrected books show no overdraft)
 
 ================================================================
  END-OF-WINDOW SUMMARY (after 2026-01-06)
 ================================================================
  ACC-001 (AED)
-   final ledger balance:      390.93
-   cumulative overdraft fees: -75.00
-   daily interest accruals:   2026-01-01=0.10, 2026-01-02=0.09, 2026-01-03=0.25, 2026-01-04=0.17, 2026-01-05=0.16, 2026-01-06=0.16
-   total interest capitalized: 0.93
+   final ledger balance:      466.03
+   cumulative overdraft fees: 0.00 (charged -75.00, compensated 75.00)
+   daily interest accruals:   2026-01-01=0.10, 2026-01-02=0.10, 2026-01-03=0.26, 2026-01-04=0.19, 2026-01-05=0.19, 2026-01-06=0.19
+   total interest capitalized: 1.03
  ACC-002 (BHD)
    final ledger balance:      10.008
-   cumulative overdraft fees: 0.000
+   cumulative overdraft fees: 0.000 (charged 0.000, compensated 0.000)
    daily interest accruals:   2026-01-01=0.000, 2026-01-02=0.000, 2026-01-03=0.000, 2026-01-04=0.000, 2026-01-05=0.004, 2026-01-06=0.004
    total interest capitalized: 0.008
  Final authorization states:
@@ -223,10 +232,13 @@ state lines; run the command for the full 169-line report.)
 
 ## Key business assumptions (all defended in AMBIGUITIES.md)
 
-1. Fees are assessed from **pre-fee** closing balances that **include earlier days'
-   fees**; a fee never triggers a second fee on the same day (idempotency key
-   account+value day), and assessed fees are **not** retroactively removed by later
-   reversals.
+1. Fees are assessed from **pre-fee** closing balances that **include earlier dates'
+   fees**; a fee never triggers a second fee on the same date (idempotency key
+   account+value date; each date is charged at most once ever). Fee ENTRIES are
+   immutable, but their effect is not necessarily permanent: when later events (e.g.
+   E9's reversal of E7) correct the books so a charged date is no longer overdrawn,
+   the next assessment boundary appends an append-only **FEE_REVERSAL compensation**
+   valued on the original fee's value date (charge and correction both stay visible).
 2. The overdraft fee is an **explicit per-currency schedule**
    (`Scenario.OVERDRAFT_FEE_SCHEDULE`) containing ONLY the supplied AED 25.00. An
    AED amount is never charged to a BHD account; a currency missing from the

@@ -577,3 +577,66 @@ WORKLOG); (D) final verification and focused commits.
   intentional failure would PASS. It must be re-aimed at the new naive
   assumption: "an assessed fee remains effective forever" (truncated stream
   without E9 -> D2 = 225.00; full stream -> D2 = 250.00).
+
+## 2026-10-18 20:05 IST — Implementation and test migration
+
+- Engine: new EntryKind.FEE_REVERSAL; ReplayResult.FeeCompensation trace record;
+  assessFees replaced by reconcileFees (desired-set recomputation from non-fee
+  entries per boundary; compensate charged-unsupported dates with append-only
+  FEE_REVERSAL valued on the original fee's date; charge never-charged desired
+  dates; charge-once/compensate-once/never-recharge lifecycle sets). ReportGenerator
+  prints compensation lines per date, in the trace, and shows charged/compensated
+  breakdown in the summary.
+- First full replay matched the hand-derived figures exactly: fees 3x25.00 charged
+  (D2/D4/D5, discovered D5), 3x25.00 compensated (D6), finals
+  250/250/650/465/465/466.03, interest 1.03, ACC-002 unchanged.
+- Test migration: ReplayTest (figures, e9 rewrite, interest 1.03), DailyProjectionTest
+  table, EventStreamTest (e3/e4/e9 figures), ReportTest (new strings + compensation
+  test), LateEventFeeTest rewritten for the compensation lifecycle (F1 compensated
+  on the D4 evening; finals 80/280/-45/255/255/255.44),
+  IntentionalFailureTest re-aimed at fee-effect permanence.
+- Real test-authoring failure during migration (honest record): the first re-aimed
+  IntentionalFailureTest asserted the mid-window Day-2 closing as 225.00 and failed
+  on the SANITY line with "expected 225.00 but was -395.00" — I had forgotten that
+  the truncated stream still contains E7's -620.00, so mid-window D2 = -395.00,
+  not 225.00. Fixed by reformulating the test on the NET FEE EFFECT (-25.00 ->
+  0.00), which isolates fee effectiveness from E7's principal compensation; the
+  javadoc records this.
+- `mvn clean test`: 88 tests, 0 failures — BUILD SUCCESS. Intentional-failure tag
+  run: 1 test, 1 failure with the intended message (-25.00 -> 0.00).
+- Committed as `ad284aa`.
+
+## 2026-10-18 20:25 IST — Documentation reconciliation
+
+- REJECTED.md: reference figures updated; criterion 1 parenthetical fixed;
+  criterion 2 rewritten as ACCEPTED WITH QUALIFICATION (three readings analyzed:
+  value-date/idempotency TRUE, totality FALSE with arithmetic, processing-date
+  FALSE); criterion 6 rewritten as ACCEPTED WITH QUALIFICATION with the
+  three-approach comparison table (persist / compensate / recompute);
+  criterion 4 figures (465.00/285.00); criterion 5 projected-view figures
+  (250.00/50.00); criterion 8 figures (1.03 vs aggregate 2545.00 x 0.0004 = 1.0180
+  -> 1.02, delta 0.01); 440-section updated (under compensation the finals are
+  465.00; only D1 of the requested figures matches; 440 needs an incoherent
+  keep-only-the-D2-fee rule); abandoned approaches gained fee persistence
+  (explicitly recorded as implemented in phases 1-7 and abandoned in phase 8).
+- AMBIGUITIES.md: #1 lifecycle bullet rewritten (immutability of entries +
+  compensation of effects); #10 rewritten (compensation policy, why, alternatives
+  as trade-offs); #11 rewritten (reconciliation semantics); #12 figures
+  (bases 250/250/650/465/465/465, total 1.03; pre/post-fee distinction unobservable
+  in this scenario, observable via LateEventFeeTest); #13 aggregate figure updated;
+  new #28 (no re-charge after compensation + the decision-basis corner
+  limitation); #3/#18 figure touch-ups (465.00).
+- README.md: business-model paragraph (reconciliation wording), assumption #1
+  rewritten, example report regenerated figures (all days, trace, summary).
+- NUMBERS.md: fee halving analysis updated for compensation; interest halving
+  example (650.00 base, 0.51 total); reconciliation consequence (1.03 vs 1.02);
+  IntentionalFailureTest constant description updated.
+- ARCHITECTURE.md: replay section, fee section (reconciliation), reversal section
+  (net effect), interest bases note, invariants table (precise attribution for
+  negativeBalanceEarnsNoInterest after the reviewer's challenge: it proves
+  idempotency-across-evenings; value/derived dates are proven by
+  exactlyOneFeePerNegativeAccountDayWithAssessedDayValueDate), alternatives #1
+  rewritten (three-way comparison).
+- Verified no stale references to renamed tests or old figures remain (grep for
+  225.00/390.93/0.93/e9DoesNotRemoveAssessedFees across docs: only intentional
+  historical references remain).

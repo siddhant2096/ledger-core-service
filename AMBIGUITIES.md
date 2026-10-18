@@ -62,16 +62,21 @@ the "sequential fee-assessment balances" terminology in REJECTED.md):
 - **Reconsideration**: an account-date not previously *charged* may be re-examined
   at every later boundary; an account-date already charged is never charged twice
   (idempotency key account|valueDate).
-- **Immutability**: an assessed fee is never removed or recomputed. A later
-  back-valued reversal may make the fee's value date positive in the final
-  projection — the fee REMAINS, because it was triggered by the books as known at
-  assessment time, not by the final reconstructed balance (see #10). The final
-  projection is therefore NOT a claim that every historical fee would still fire if
-  the complete stream had been known beforehand: under hypothetical full prior
-  knowledge (E7 and E9 both known), no date is ever negative pre-fee and no fee
-  would have been triggered at all. The report separates the two views
-  deliberately: per-date balances are end-of-window projections; the FEE ASSESSMENT
-  TRACE shows what was knowable when each fee was actually derived.
+- **Immutability and compensation** (policy revised in the final review — see #10):
+  fee ENTRIES are immutable — never mutated, never deleted. But their financial
+  EFFECT is not necessarily permanent: at every assessment boundary the engine
+  recomputes the desired fee set from non-fee entries, and a charged date whose
+  corrected books no longer show an overdraft (e.g. after E9) receives an
+  append-only FEE_REVERSAL compensation entry valued on the original fee's value
+  date. A compensated date is never re-charged (#28). So the fee trace shows what
+  was charged when, and the entry list shows the full charge+compensation history;
+  the final projection reflects the net effect. The final projection is NOT a claim
+  that every historical fee would still fire if the complete stream had been known
+  beforehand: under hypothetical full prior knowledge (E7 and E9 both known), no
+  date is ever negative pre-fee and no fee would have been triggered at all. The
+  report separates the two views deliberately: per-date balances are end-of-window
+  projections; the FEE ASSESSMENT TRACE shows what was knowable when each fee was
+  actually derived and when it was compensated.
 
 ## 2. Can a fee itself trigger another fee?
 
@@ -102,7 +107,7 @@ the "sequential fee-assessment balances" terminology in REJECTED.md):
 3. **Why**: causal consistency — a decision can only use information that exists when
    it is made. Authorization is an operational risk decision, not a projection.
 4. **Alternatives**: (a) validate against the final end-of-window projection — would
-   approve Auth-B (390.00 final Day-5 balance) but is acausal; (b) validate against
+   approve Auth-B (465.00 final Day-5 balance) but is acausal; (b) validate against
    value-date-only balances excluding late events — approves Auth-B (465.00), ignoring
    a known fact (E7), which is operationally indefensible.
 5. **Consequence**: Auth-B is DECLINED (known ledger −155.00; −155.00 − 90.00 < 0).
@@ -223,51 +228,67 @@ the "sequential fee-assessment balances" terminology in REJECTED.md):
 
 1. **Ambiguity**: E9 cancels E7's debit — is the Day-2 overdraft fee (assessed because
    of E7) refunded?
-2. **Chosen policy** (business-policy choice): no. Assessed fee entries are
-   immutable; they stand. A refund would require an explicit new business event
-   (e.g. FEE_REVERSAL), which is not in the stream.
-3. **Why**: accounting-grade conservatism — a fee legitimately assessed against the
-   books as they stood is a customer-visible fact; rewriting it erases audit
-   history. Fee persistence is the whole point of "derived entry, replayable,
-   idempotent".
-4. **Alternative**: recompute fees on every replay (fees as pure function of the
-   final stream). A defensible policy with a genuinely different outcome — under
-   full-knowledge recomputation, E9 removes the cause of every fee, so all three
-   fees would vanish and criterion 6 would hold. Not chosen: it makes fee income
-   depend on event arrival order and rewrites customer-visible charges
-   retroactively. The choice is a trade-off between auditability (chosen) and
-   counterfactual cleanliness (not chosen), not a matter of one side being
-   arithmetically wrong.
-5. **Consequence**: final Day-2 closing is 225.00, not 250.00; cumulative fees are
-   75.00 after E9 (criterion 6 is therefore REJECTED under this policy — see
-   REJECTED.md). Note carefully what the final projection does and does not show:
-   Day 2's reconstructed pre-fee balance is +250.00 (positive), yet the Day-2 fee
-   remains. The fee was triggered by the books as known on the Day-5 evening, not
-   by the final reconstructed balance; the final projection is not evidence that
-   each historical fee would still fire had the complete stream been known in
-   advance (under full prior knowledge, no fee would have fired at all).
-6. **Test**: `ReplayTest.e9DoesNotRemoveAssessedFees`, and the focused
-   `LateEventFeeTest.alreadyAssessedFeeSurvivesALateEventThatMakesItsDatePositive`.
+2. **Chosen policy** (business-policy choice; REVISED in the final acceptance review
+   — the earlier policy, persistence without compensation, is recorded as an
+   abandoned approach in REJECTED.md): YES, effectively — by append-only
+   compensation. Fee ENTRIES are immutable (never mutated or deleted), but at every
+   assessment boundary the desired fee set is recomputed from non-fee entries, and
+   any charged fee whose date is no longer overdrawn in the corrected books is
+   neutralized by a FEE_REVERSAL entry of the opposite sign, valued on the original
+   fee's value date and derived on the boundary's processing date. E9 therefore
+   leaves all three fee entries intact AND appends three compensation entries on the
+   Day-6 evening; net fees return to zero.
+3. **Why**: the acceptance review established that no explicit requirement mandates
+   fee persistence — append-only governs events and entries, not their permanent
+   financial effect — and that criterion 6 is satisfiable without violating any
+   higher-priority requirement. Compensation beats both alternatives: it satisfies
+   criterion 6, preserves the COMPLETE audit trail (charge and correction both
+   visible, each with its own dates), and keeps replay deterministic and idempotent.
+   It also matches accounting practice: when the debit that caused an overdraft is
+   reversed as erroneous, the overdraft charge caused by it is reversed too.
+4. **Alternatives**: (a) persistence (fees, once assessed, stay effective forever) —
+   the implemented policy in phases 1–7; defensible on point-in-time grounds but
+   fails criterion 6 and charges for an overdraft the corrected books say never
+   happened; (b) full recompute (fees as a pure projection of the final stream) —
+   satisfies criterion 6 but discards the point-in-time assessment history that the
+   assignment's "derived accounting entry" framing calls for. Both remain
+   documented trade-offs; neither is arithmetically wrong.
+5. **Consequence**: final Day-2 closing is 250.00; net cumulative fees are 0.00
+   (charged −75.00, compensated +75.00); criterion 6 is ACCEPTED in net terms — see
+   REJECTED.md for the exact qualification. The final projection is not a claim
+   that each historical fee would have fired under full prior knowledge (under full
+   prior knowledge, no fee would have fired at all); the FEE ASSESSMENT TRACE
+   preserves what was knowable at each boundary.
+6. **Test**: `ReplayTest.e9LeavesFeeEntriesIntactAndCompensatesThem`, and the focused
+   `LateEventFeeTest.chargedFeeIsCompensatedWhenALateEventCorrectsItsDate`.
 
 ## 11. Are fee assessments recomputed after late events and reversals?
 
 1. **Ambiguity**: when E7 arrives on Day 5, do we revisit Days 1–4?
-2. **Chosen policy**: yes for days never fee-assessed (a late event can reveal a
-   historical overdraft — assessed on the current evening, valued on the historical
-   day); never for days already assessed (no duplicates, no removals).
-   Re-examination happens ONLY at the defined processing-time boundaries (evenings
-   of completed processing dates and the window end — the exact trigger logic is in
-   #20); there is no per-event or mid-day assessment.
-3. **Why**: combines correctness (back-valued overdrafts are caught) with stability
-   (charges never change once made).
+2. **Chosen policy**: yes — every boundary runs a full RECONCILIATION over the
+   window prefix: the desired fee set is recomputed deterministically from non-fee
+   entries (sequential, fee-participating semantics, #1), then (a) never-charged
+   desired dates are charged (at most once ever), (b) charged dates no longer
+   desired are compensated via FEE_REVERSAL (at most once ever), (c) desired dates
+   already charged stay charged. Reconciliation happens ONLY at the defined
+   processing-time boundaries (evenings of completed processing dates and the
+   window end — the exact trigger logic is in #20); there is no per-event or
+   mid-day assessment.
+3. **Why**: combines correctness (back-valued overdrafts are caught; erroneous
+   charges are corrected) with stability (each date is charged at most once and
+   compensated at most once — no oscillation, no duplicates) and full auditability
+   (charges and compensations are separate immutable entries).
 4. **Alternative**: never revisit — misses E7's Day-2 overdraft entirely and fails the
    spec's core "late event affects earlier days" requirement (a requirement, so this
    alternative is non-conforming, not merely different).
 5. **Consequence**: all three fees are derived on the evening of processing Day 5,
-   valued on Days 2, 4, 5. The full lifecycle (basis, boundaries, reconsideration,
-   immutability, valueDate vs derivedOnDate) is specified in #1.
+   valued on Days 2, 4, 5; all three compensations are derived on the evening of
+   Day 6, valued on Days 2, 4, 5. The full lifecycle (basis, boundaries,
+   reconsideration, immutability-plus-compensation, valueDate vs derivedOnDate) is
+   specified in #1.
 6. **Test**: `BoundaryAndValidationTest.lateEventIsReflectedInFeeAssessmentOnlyAfterItIsProcessed`,
-   `LateEventFeeTest.unassessedHistoricalDayIsReconsideredExactlyOnce`.
+   `LateEventFeeTest` (both directions: charge of an uncharged date, compensation of
+   a charged date).
 
 ## 12. Which balance is the interest base?
 
@@ -279,19 +300,23 @@ the "sequential fee-assessment balances" terminology in REJECTED.md):
    (capitalization is computed from it, so it cannot include itself).
 3. **Why**: consistency — one definition of ledger balance used everywhere (fees,
    interest, available balance, report).
-4. **Alternative**: pre-fee base — would make Day-2 accrual 0.10 instead of 0.09 and
-   the capitalized total 0.94 instead of 0.93. A defensible business policy (some
-   banks pay interest on the pre-charge balance); not chosen because the spec's
-   ledger-balance definition includes fee entries.
+4. **Alternative**: pre-fee base (exclude fee entries from the base). A defensible
+   business policy (some banks pay interest on the pre-charge balance); not chosen
+   because the spec's ledger-balance definition includes fee entries. Note that in
+   THIS scenario's final projection all fees are compensated, so fee charges and
+   compensations net to zero and the two policies coincide here; the distinction is
+   observable whenever a fee remains effective at window end (e.g.
+   `LateEventFeeTest`: Day-4 base is 255.00 including the effective Day-3 fee;
+   pre-fee it would be 280.00 → accrual 0.11 instead of 0.10).
 5. **Consequence** (verified against the implementation and the actual report):
-   bases D1 250.00, D2 225.00, D3 625.00, D4 415.00, D5 390.00, D6 390.00; daily
-   rounded accruals 0.10 / 0.09 / 0.25 / 0.17 / 0.16 / 0.16 summing to exactly
-   AED 0.93, capitalized ONCE as a single credit valued on the window-end date
+   bases D1 250.00, D2 250.00, D3 650.00, D4 465.00, D5 465.00, D6 465.00; daily
+   rounded accruals 0.10 / 0.10 / 0.26 / 0.19 / 0.19 / 0.19 summing to exactly
+   AED 1.03, capitalized ONCE as a single credit valued on the window-end date
    (Day 6). These bases are **final historical projections** — the balances as
-   reconstructed from the complete stream — NOT necessarily the balances known on
-   each processing day (e.g. Day 2's base includes the Day-2 fee that was only
-   discovered on Day 5, and E7/E9's compensating pair). REJECTED.md and README.md
-   use the same "final projection" terminology.
+   reconstructed from the complete stream (including E7/E9's compensating pair and
+   the fee charge/compensation pairs) — NOT necessarily the balances known on each
+   processing day. REJECTED.md and README.md use the same "final projection"
+   terminology.
 6. **Test**: `ReplayTest.interestAccruesOnPositivePostFeeBalancesOnly`,
    `ReplayTest.capitalizedInterestEqualsSumOfRoundedDailyAccrualsExactly`,
    `DailyProjectionTest`.
@@ -305,10 +330,11 @@ the "sequential fee-assessment balances" terminology in REJECTED.md):
 3. **Why**: the spec requires Σ rounded dailies == capitalized total; defining the
    total as the sum satisfies it by construction and matches per-day statements a
    customer could verify.
-4. **Alternative**: round the aggregate (2295.00 × 0.0004 = 0.918 → 0.92) and allocate
-   the residual to the last day — gives 0.92 vs our 0.93, an observable difference,
-   and makes some daily statement line differ from what was capitalized for it.
-5. **Consequence**: ACC-001 capitalized 0.93; ACC-002 capitalized 0.008.
+4. **Alternative**: round the aggregate (2545.00 × 0.0004 = 1.0180 → 1.02) and
+   allocate the residual to the last day — gives 1.02 vs our 1.03, an observable
+   difference, and makes some daily statement line differ from what was capitalized
+   for it.
+5. **Consequence**: ACC-001 capitalized 1.03; ACC-002 capitalized 0.008.
 6. **Test**: `ReplayTest.capitalizedInterestEqualsSumOfRoundedDailyAccrualsExactly`.
 
 ## 14. How are three "equal" BHD instalments allocated?
@@ -397,8 +423,9 @@ assumption explicit but cannot eliminate it.
 3. **Why**: rejection means "this did not happen, accounting-wise".
 4. **Alternative**: record a zero-amount marker entry — rejected as noise in the
    books.
-5. **Consequence**: ACC-001 Day-4 closing is 415.00 (only E5's −185.00 and fees), not
-   235.00 (which would wrongly include E6's −180.00).
+5. **Consequence**: ACC-001 Day-4 closing is 465.00 (E5's −185.00 and the
+   compensated-to-zero fees), not 285.00 (which would wrongly include E6's
+   −180.00).
 6. **Test**: `ReplayTest.authZSettlementIsRejectedAndPostsNothing` asserts the Day-4
    balance.
 
@@ -604,3 +631,26 @@ assumption explicit but cannot eliminate it.
 5. **Consequence**: rejection reasons are stable and single; a caller fixing one
    problem may reveal the next (acceptable for a strict ingestion path).
 6. **Test**: `BoundaryAndValidationTest.validationOrderIsDeterministic`.
+
+## 28. Is a fee re-charged if a compensated date goes negative again?
+
+1. **Ambiguity**: under reconciliation (#10, #11), a date can be charged, later
+   compensated, and later still go negative again. Does it earn a second fee?
+2. **Chosen policy** (business-policy choice): no. "Assess once per account per day"
+   is read as ONE fee lifecycle per account-date: charge at most once, compensate
+   at most once, never re-charge. A date that goes negative after compensation
+   simply stays negative without a new fee.
+3. **Why**: the spec's "once per account per day" is the strongest textual anchor;
+   re-charging would also let a single date accumulate multiple charge entries,
+   complicating the audit story (which fee does a second compensation refer to?).
+4. **Alternative**: re-charge after compensation (a fresh fee episode). Defensible —
+   the date IS negative again — but it stretches "once per account per day" and adds
+   lifecycle complexity for a case that does not occur in the scenario.
+5. **Consequence / known limitation**: in the charge → compensate → negative-again
+   corner, the reconciliation's decision bases (which include desired-fee
+   participation) can differ slightly from the actual books (which contain no new
+   fee for that date). The corner is deterministic and documented; the scenario and
+   all tests exercise it only up to compensation, never re-negativing.
+6. **Test**: the charge-once/compensate-once invariants are enforced by
+   `LateEventFeeTest` (charge and compensation counts) and
+   `ReplayTest.replayIsDeterministic`.

@@ -18,11 +18,15 @@ suite):
   D5 −155.00 (D3 = −370.00 + 400.00; D4 = 30.00 − 185.00; D5 = −155.00). The two
   series answer different questions — "is this date negative when assessed in
   sequence?" versus "what were the books before any fee existed?" — and this
-  document never calls either of them just "pre-fee" without saying which.
-- Final (post-fee, post-reversal) closings, ACC-001: D1 250.00, D2 225.00,
-  D3 625.00, D4 415.00, D5 390.00, D6 390.93.
-- Fees: 3 × AED 25.00, valued on Days 2, 4, 5; all derived on processing Day 5.
-- Interest: 0.10 / 0.09 / 0.25 / 0.17 / 0.16 / 0.16 → 0.93 capitalized (ACC-001);
+  document never calls either of them just "pre-fee" without qualification.
+- Final (post-fee, post-reversal, post-compensation) closings, ACC-001:
+  D1 250.00, D2 250.00, D3 650.00, D4 465.00, D5 465.00, D6 466.03.
+- Fees: 3 × AED 25.00 CHARGED (valued Days 2, 4, 5; derived on the evening of
+  processing Day 5) and 3 × AED 25.00 COMPENSATED (same value dates, derived on
+  the Day-6 evening after E9) → net 0.00. All six entries remain in the
+  append-only entry list (policy: AMBIGUITIES.md #10, #11, #28).
+- Interest: bases 250/250/650/465/465/465 → accruals
+  0.10 / 0.10 / 0.26 / 0.19 / 0.19 / 0.19 → 1.03 capitalized (ACC-001);
   0.004 + 0.004 → 0.008 capitalized (ACC-002).
 
 ---
@@ -40,47 +44,50 @@ evening of Day 5, i.e. "after evaluation"), so the pre-fee qualification is sati
 **Assumptions stated explicitly**: this is the *point-in-time* view (only events
 processed by end of Day 5) and *pre-fee* (the Day-2 fee of 25.00 is derived during
 the Day-5 evening assessment, immediately after this balance is computed). Under the
-final end-of-window projection the Day-2 closing is instead 225.00 (E9's +620.00
-compensation and the −25.00 fee, both valued Day 2).
+final end-of-window projection the Day-2 closing is 250.00 again (E9's +620.00
+compensation, plus the −25.00 fee and its +25.00 compensation, all valued Day 2).
 
 **Enforced by**: `ReplayTest.exactlyOneFeePerNegativeAccountDayWithAssessedDayValueDate`
 (fee trace records preFeeBalance −370.00 for value day 2, assessed on day 5) and the
 report's FEE ASSESSMENT TRACE.
 
-## Criterion 2 — REJECTED (under the documented policy; arithmetic below)
+## Criterion 2 — ACCEPTED WITH QUALIFICATION (interpretation-dependent)
 
 > "E7 causes exactly one overdraft fee to be assessed, on Day 2."
 
-**Verdict under the documented policy.** Under the documented policy of assessing a
-fee for each negative account-day (AMBIGUITIES.md #1, #2, #11), the event history
-results in fees valued on Days 2, 4, and 5 — three fees, not one. The outcome is
-determined by the fee schedule and the assessment timing, so this rejection is
-tied to that documented policy rather than to a claim about every conceivable model.
+**The criterion is genuinely ambiguous between materially different readings**, and
+the verdict depends on the reading:
 
-**Arithmetic (sequential fee-assessment balances, evening of Day 5).** E7 makes
-Day 2 negative: 250.00 − 620.00 = −370.00 → fee F1 (valued Day 2). The assessment
-then walks forward with previously assessed fees included:
+- **Reading (i) — value-date/idempotency reading: "exactly one fee is ever assessed
+  FOR Day 2."** TRUE. Exactly one fee with value date Day 2 is ever assessed: it is
+  charged on the Day-5 evening and never duplicated across any of the later
+  boundary re-examinations (idempotency key account|valueDate). After E9 it is
+  compensated — but compensation is not a second assessment, and the date is never
+  re-charged. This reading fits the fee rule's own phrasing ("assess ONCE PER
+  ACCOUNT PER DAY") and the assignment's pervasive value-date discipline.
+- **Reading (ii) — totality reading: "E7 causes exactly one fee in total."** FALSE.
+  On the Day-5 evening, E7's knock-on produced THREE assessments — arithmetic:
+  D2: 250.00 − 620.00 = −370.00 → fee; D3: −370.00 − 25.00 + 400.00 = +5.00 → none;
+  D4: 5.00 − 185.00 = −180.00 → fee; D5: −180.00 − 25.00 = −205.00 → fee (sequential
+  fee-assessment balances; even excluding earlier fees from later bases, D4 =
+  −155.00 and D5 = −155.00, still negative). All three are compensated after E9, but
+  they WERE assessed.
+- **Reading (iii) — processing-date reading: "the assessment happens on Day 2."**
+  FALSE: on Day 2's own evening the books showed +250.00 (E7 had not arrived); the
+  Day-2 fee was discovered and derived on processing Day 5.
 
-- Day 3: −370.00 − 25.00 + 400.00 = **+5.00** → no fee.
-- Day 4: 5.00 − 185.00 = **−180.00** → fee F2.
-- Day 5: −180.00 − 25.00 = **−205.00** → fee F3.
+**Chosen interpretation**: (i), and the criterion is ACCEPTED under it. Rationale:
+the fee rule is defined per account-day, criterion 1 already established the
+convention of naming the fee by its value date, and (i) is the only reading that is
+both non-trivially true and consistent with the assignment's value-date framing.
+**Qualification**: if the intended reading was (ii), the criterion is incorrect on
+the arithmetic above (three fees, not one); if (iii), it misstates WHEN assessment
+happens. All three readings are recorded here rather than silently picking one.
 
-Even if previously assessed fees were EXCLUDED from later dates' bases (the
-alternative reading considered in AMBIGUITIES.md #1), Day 4 would be
-250.00 − 620.00 + 400.00 − 185.00 = −155.00 → still negative, still charged, so the
-"exactly one fee" claim fails under both participation readings of the documented
-policy. A model in which only Day 2 is ever charged (e.g. the lagged/targeted
-reassessment variant discussed in the 440.00 section below) would make the
-criterion true, but that model contradicts the fee rule's plain text ("when that
-day's closing ledger balance is negative") and the requirement to examine all
-relevant value dates; it was not chosen. Total under the documented policy:
-3 × AED 25.00 = AED 75.00.
-
-**Verified against code and tests**: the replay produces exactly three
-`FEE_OVERDRAFT` entries with value dates 2/4/5, all derived on the evening of
-processing Day 5, with sequential pre-fee balances −370.00 / −180.00 / −205.00
-(`ReplayTest.exactlyOneFeePerNegativeAccountDayWithAssessedDayValueDate`;
-report FEE ASSESSMENT TRACE).
+**Verified against code and tests**: exactly three `FEE_OVERDRAFT` entries (value
+dates D2/D4/D5, derived on the Day-5 evening, pre-fee balances
+−370.00/−180.00/−205.00), exactly one of them valued Day 2 — asserted by
+`ReplayTest.exactlyOneFeePerNegativeAccountDayWithAssessedDayValueDate`.
 
 ## Criterion 3 — ACCEPTED
 
@@ -96,12 +103,14 @@ processing Day 2), the figures actually known were:
 - Decision: **APPROVED**
 
 (These are the figures the engine printed in the decision note: "AUTH APPROVED:
-ledger=AED 250.00 activeHolds=AED 0.00 requested=AED 200.00".) The AED 225.00
-Day-2 ledger balance and AED 25.00 Day-2 available balance that appear elsewhere in
-the report are a **later projected view**: they incorporate E7, E9, and the Day-2
-fee of 25.00, none of which existed when Auth-A was approved. They describe how
-Day 2 looks in the end-of-window projection, not what was knowable at approval
-time, and are never used for the approval decision.
+ledger=AED 250.00 activeHolds=AED 0.00 requested=AED 200.00".) The report's Day-2
+line shows ledger 250.00 and available 50.00 — an **end-of-window projected view**
+computed from the complete stream (E7, E9, and the charged-then-compensated Day-2
+fee included), not what was knowable at approval time. In this stream the projected
+ledger balance coincides numerically with the approval-time one (the late debit and
+all its fee effects net out), but the two views answer different questions and are
+never mixed in the engine: the approval decision used only processing-time
+knowledge.
 
 E5 (Day 4): authorization exists, status APPROVED (settleable), amount 185.00 > 0,
 185.00 ≤ 200.00 (hold) → accepted. Posts −185.00 valued Day 4; authorization →
@@ -122,7 +131,7 @@ account balance at settlement time (AMBIGUITIES.md #5–#7); that policy is what
 **Reasoning.** Auth-Z has no authorization record. The engine rejects E6 with
 `UNKNOWN_AUTHORIZATION`, appends no ledger entry, and creates/consumes no
 authorization state. ACC-001's Day-4 closing reflects only the Auth-A settlement
-(415.00, not 235.00), proving the funds did not move.
+(465.00, not 285.00), proving the funds did not move.
 
 **Scope note**: "must be rejected" is a policy choice (AMBIGUITIES.md #5), not an
 arithmetical truth — the alternative (post-and-flag-unmatched) exists. We chose
@@ -146,43 +155,50 @@ demonstrate this without conflating timelines:
 
 - **At approval time (Day 2, processing-time view)**: ledger 250.00, hold 200.00 →
   available 50.00; the ledger balance is untouched by the hold.
-- **End-of-window projection view**: the report's Day-2 line shows ledger 225.00
-  and available 25.00 (= 225.00 − 200.00). This is a *later projected* Day-2 figure
-  that includes the Day-2 fee discovered on Day 5 — it is not what was known when
-  the hold was approved.
+- **End-of-window projection view**: the report's Day-2 line shows ledger 250.00
+  and available 50.00 (= 250.00 − 200.00). This is a *later projected* Day-2 figure
+  that includes E7, E9, and the charged-then-compensated Day-2 fee — coincidentally
+  equal to the approval-time ledger balance in this stream, but computed from the
+  complete stream, not from what was known at approval time.
 
 **Enforced by**: `ReplayTest.authBIsDeclinedBecauseTheAccountWasOverdrawnAtProcessingTime`
 and the Day-2 available-balance line in `ReportTest`.
 
-## Criterion 6 — REJECTED (under the documented immutable-fee policy)
+## Criterion 6 — ACCEPTED WITH QUALIFICATION (policy changed in the final review)
 
 > "After E9, all balances and fees return to their pre-E7 values."
 
-**Arithmetic and reasoning.** E9 reverses E7's debit by exact compensation
-(+620.00 valued Day 2, matching E7's −620.00 valued Day 2; neither entry is ever
-mutated or deleted). Consequently the *pre-fee* value-date balances DO return to
-their pre-E7 values — Day-2 pre-fee is +250.00 again. But the fees already booked
-on the evening of Day 5 (3 × 25.00, value dates 2/4/5) remain as ledger entries
-under the documented policy (AMBIGUITIES.md #10) and are not removed by E9. So
-*post-fee* balances do NOT return: Day-2 final = 225.00 ≠ 250.00, cumulative fees =
-75.00 ≠ 0.00, and interest bases shift accordingly (Day-2 base 225.00, not 250.00).
-The criterion is rejected because it claims BOTH balances and fees return; under the
-documented policy only the pre-fee balances do.
+**History of this verdict**: earlier phases of this project REJECTED the criterion
+on the basis of a *chosen* policy ("assessed fees are immutable and remain
+effective forever"). The final acceptance review established that this reasoning
+was circular: no explicit requirement mandates fee persistence. Append-only applies
+to events and entries — and an append-only ledger can keep the original fee entries
+AND neutralize them with compensating fee-reversal entries. The policy was changed
+accordingly (WORKLOG.md, phase 8).
 
-**Policy status stated plainly**: fee immutability is a deliberate business-policy
-and auditability choice — an assessed charge is a customer-visible fact, and
-correcting one requires a new explicit compensating entry (e.g. a fee-refund event),
-never a retroactive erasure. It is NOT the only accounting approach that could be
-considered sound: a full-recompute policy would also be defensible, and under it the
-outcome would depend on the chosen fee policy and on whether previously assessed
-charges are reversed via compensating entries or recalculated from scratch. Under
-pure recalculation with this stream, E9 removes the cause of every fee (no final
-closing is negative), so all three fees would vanish and the criterion would hold —
-which is precisely why this criterion is policy-dependent rather than arithmetically
-wrong. We chose immutability for auditability; the trade-off is documented in
-AMBIGUITIES.md #10 and the abandoned-approaches section below.
+**Approaches compared** (all replayable, deterministic, append-only):
 
-**Enforced by**: `ReplayTest.e9DoesNotRemoveAssessedFees`.
+| Approach | Criterion 6 | Auditability | Verdict |
+|---|---|---|---|
+| Persist fees forever | FAILS (D2 = 225.00, fees 75.00) | full history, but keeps charges for an overdraft the corrected books say never happened | rejected: fails the criterion without a tier-1 justification; makes fee income depend on event arrival order |
+| **Compensate via FEE_REVERSAL entries (chosen)** | HOLDS in net terms (D2 = 250.00, net fees 0.00) | fullest history: charge AND compensation both visible | satisfies the criterion without violating append-only, replayability, or idempotency |
+| Full recompute (fees as pure projection) | HOLDS | loses point-in-time history (the fact that fees were assessed on Day 5 disappears) | not chosen: the assignment wants fee assessments as derived accounting ENTRIES with an audit trail |
+
+**Result under the chosen policy**: E9 compensates E7 exactly; the Day-6 evening
+reconciliation finds no date overdrawn and appends +25.00 compensations valued on
+Days 2/4/5. Final balances D1–D6 = 250.00 / 250.00 / 650.00 / 465.00 / 465.00 /
+466.03 — the pre-E7 values (D5/D6 did not exist pre-E7; 465.00 is their pre-E7
+would-be value). Net cumulative fees = 0.00 = the pre-E7 value. The criterion HOLDS.
+
+**Qualification**: "return" holds in NET terms. The six fee-related entries (3
+charges + 3 compensations) remain in the entry list — that is what append-only
+means. If the criterion were read as "the log contains no trace of the fees", it
+would conflict with the explicit append-only requirement, and that requirement
+would take precedence. Under the only reading compatible with append-only (net
+financial effect), the criterion is satisfied.
+
+**Enforced by**: `ReplayTest.e9LeavesFeeEntriesIntactAndCompensatesThem`,
+`ReplayTest.finalDailyClosingsMatchHandDerivation`.
 
 ## Criterion 7 — REJECTED (money conservation violation)
 
@@ -209,13 +225,14 @@ reasoning: discarding a remainder silently destroys money, which violates the
 conservation principle any accounting core must satisfy — every minor unit must be
 accounted for.
 
-**Arithmetic (unchanged).** The daily AED accruals (each rounded HALF_UP to 2dp)
-are 0.10 + 0.09 + 0.25 + 0.17 + 0.16 + 0.16 = **0.93**, and the capitalized total is
-defined as exactly that sum, so no remainder ever arises under the chosen policy.
-The discrepancy is real under the alternative aggregate-rounding approach: the sum
-of the daily bases is 250.00 + 225.00 + 625.00 + 415.00 + 390.00 + 390.00 =
-2295.00, and 2295.00 × 0.0004 = 0.918 → rounded **0.92** ≠ 0.93 — a difference of
-**AED 0.01** that must not be silently discarded under the specification.
+**Arithmetic (unchanged policy; figures reflect the fee-compensation policy).** The
+daily AED accruals (each rounded HALF_UP to 2dp) are 0.10 + 0.10 + 0.26 + 0.19 +
+0.19 + 0.19 = **1.03**, and the capitalized total is defined as exactly that sum,
+so no remainder ever arises under the chosen policy. The discrepancy is real under
+the alternative aggregate-rounding approach: the sum of the daily bases is
+250.00 + 250.00 + 650.00 + 465.00 + 465.00 + 465.00 = 2545.00, and
+2545.00 × 0.0004 = 1.0180 → rounded **1.02** ≠ 1.03 — a difference of **AED 0.01**
+that must not be silently discarded under the specification.
 Aggregate-rounding is not inherently invalid: it would need an explicit,
 deterministic reconciliation policy (e.g. allocating the 0.01 residual to the final
 day's accrual). The sum-of-rounded-dailies policy was chosen because it makes the
@@ -232,9 +249,14 @@ A later review requested assertions for final AED value-date projections of
 D1 250.00, D2 225.00, D3 625.00, **D4–D6 440.00** before capitalization, "assuming
 E7 and E9 cancel and the AED 25 Day-2 fee remains".
 
-**Verdict: D1–D3 ACCEPTED (they match); the D4–D6 = 440.00 figure is REJECTED as
-incompatible with the stated fee rules.** This is an arithmetic finding, not a
-policy preference:
+**Verdict (updated for the fee-compensation policy adopted in the final review):
+only D1 matches; the D2/D3 (225.00/625.00) and D4–D6 (440.00) figures are REJECTED
+as incompatible with the stated fee rules.** The requested set assumes exactly one
+PERSISTENT fee (D2). Under the documented policy the Day-2 fee is assessed on the
+Day-5 evening and then compensated on the Day-6 evening, so the final projections
+are D2 = 250.00, D3 = 650.00, D4–D6 = 465.00. This is an arithmetic finding, not a
+policy preference — and it held under the old persistence policy too (which gave
+225.00/625.00/415.00/390.00/390.00):
 
 The 440.00 figure implies exactly one fee (D2). But the fee rule is "assess once per
 account per day when that day's closing ledger balance is negative", and on the
@@ -249,14 +271,18 @@ terminology note at the top of this document) were:
 
 (Even WITHOUT fee participation in later bases, D4 = 30.00 − 185.00 = −155.00 and
 D5 = −155.00 — still negative, still charged.) So D4 and D5 fees are mandatory under
-the plain fee rule whenever all value dates are examined on the D5 evening. With
-those fees immutable (the documented policy this review also mandates), the final
-pre-capitalization projections are D4 = 415.00, D5 = 390.00, D6 = 390.00.
+the plain fee rule whenever all value dates are examined on the D5 evening. (Under
+the fee-compensation policy adopted in the final review, all three fees are
+compensated after E9 and the final pre-capitalization projections are
+D4 = D5 = D6 = 465.00 — still not 440.00, because 440.00 needs the D2 fee to persist
+while the D4/D5 fees do not.)
 
 The 440.00 figures can only be produced by a model that either:
 
-1. **erases the D4/D5 fees when E9 arrives** — retroactive erasure of assessed,
-   customer-visible charges, forbidden by the immutable-derived-entry policy; or
+1. **erases the D4/D5 fees when E9 arrives but keeps the D2 fee** — no coherent
+   trigger rule exists for compensating exactly the knock-on fees while keeping the
+   direct one (E9's compensation neutralizes D2's overdraft just as much as D4's);
+   retroactive erasure of entries would also violate append-only; or
 2. **never assesses D4/D5 on the D5 evening despite their negative closings** —
    violating "assess … when that day's closing ledger balance is negative" and the
    review's own requirement that "all relevant value dates are examined"; or
@@ -266,18 +292,18 @@ The 440.00 figures can only be produced by a model that either:
    fact) when closing D5, and which would still have charged D5 = −155.00 on any
    non-lagged reading.
 
-All three were evaluated and rejected: (1) destroys audit history, (2) contradicts
-the fee rule's plain text, (3) trades one inconsistency for a stranger one (a date
-reported as −180.00 point-in-time yet never fee-charged).
+All three were evaluated and rejected: (1) has no coherent rule and breaks
+append-only, (2) contradicts the fee rule's plain text, (3) trades one
+inconsistency for a stranger one (a date reported as −180.00 point-in-time yet
+never fee-charged).
 
-**Consequence**: D1 = 250.00, D2 = 225.00, D3 = 625.00 are asserted exactly as
-requested (`DailyProjectionTest`); D4–D6 are asserted as 415.00 / 390.00 / 390.00
-(pre-capitalization; D6 = 390.93 after the 0.93 capitalization). Note the
-interesting coincidence: 440.00 IS the correct figure under the alternative
-"recompute fees at window end" policy ONLY if the D2 fee were also erased — which
-would give 465.00, not 440.00 — so 440.00 matches no self-consistent policy we could
-construct. This mirrors original criterion 2 ("exactly one fee, on Day 2"), rejected
-above on the same arithmetic.
+**Consequence** (updated for the fee-compensation policy): D1 = 250.00,
+D2 = 250.00, D3 = 650.00 are asserted (`DailyProjectionTest`); D4–D6 are asserted
+as 465.00 / 465.00 / 465.00 pre-capitalization (D6 = 466.03 after the 1.03
+capitalization). Note: 440.00 matches no self-consistent policy we could construct
+— persistence of only the D2 fee (415/390/390 under the old policy), full
+compensation (465), and persistence of all fees (415/390/390) all disagree with it.
+This mirrors the totality reading of criterion 2 (addressed above).
 
 ---
 
@@ -320,7 +346,7 @@ fabricated experiment.
    because silently changing the merchant's amount hides discrepancies. Replaced by
    full rejection of excess settlements.
 5. **Rounding the aggregate interest and allocating the residual to the last day.**
-   Evaluated arithmetically when deciding criterion 8 (the 0.918 → 0.92 vs 0.93
+   Evaluated arithmetically when deciding criterion 8 (the 1.0180 → 1.02 vs 1.03
    computation above); abandoned in favor of sum-of-rounded-dailies, which makes the
    reconciliation identity exact by construction and keeps daily statement lines
    equal to what was capitalized for them. (AMBIGUITIES.md #13.)
@@ -328,3 +354,13 @@ fabricated experiment.
    (documented in AMBIGUITIES.md #4); rejected without implementation because holds
    are operational reservations of current spending power and back-valued holds
    would destabilize past approval decisions. Replaced by processing-time holds.
+7. **Fee persistence (assessed fees remain effective forever).** This one WAS the
+   implemented policy for most of the project (phases 1–7, visible in the Git
+   history and WORKLOG) — not merely considered. It was abandoned in the final
+   acceptance review (WORKLOG phase 8): the review established that no explicit
+   requirement mandates persistence, that append-only history is fully preserved by
+   compensating fee-reversal entries, and that persistence failed acceptance
+   criterion 6 while keeping charges for an overdraft the corrected books say never
+   happened. Replaced by deterministic fee reconciliation with append-only
+   FEE_REVERSAL compensation (AMBIGUITIES.md #10, #11, #28). Its trade-off remains
+   documented in AMBIGUITIES.md #10 as a defensible alternative.
