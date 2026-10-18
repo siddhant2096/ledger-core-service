@@ -49,26 +49,38 @@ class ReportTest {
 
     @Test
     void reportShowsFinalFigures() {
-        assertTrue(report.contains("final ledger balance:      390.93"));
+        assertTrue(report.contains("final ledger balance:      466.03"));
         assertTrue(report.contains("final ledger balance:      10.008"));
-        assertTrue(report.contains("cumulative overdraft fees: -75.00"));
-        assertTrue(report.contains("total interest capitalized: 0.93"));
+        assertTrue(report.contains("cumulative overdraft fees: 0.00 (charged -75.00, compensated 75.00)"));
+        assertTrue(report.contains("total interest capitalized: 1.03"));
         assertTrue(report.contains("total interest capitalized: 0.008"));
-        assertTrue(report.contains("2026-01-01=0.10, 2026-01-02=0.09, 2026-01-03=0.25, "
-                + "2026-01-04=0.17, 2026-01-05=0.16, 2026-01-06=0.16"));
+        assertTrue(report.contains("2026-01-01=0.10, 2026-01-02=0.10, 2026-01-03=0.26, "
+                + "2026-01-04=0.19, 2026-01-05=0.19, 2026-01-06=0.19"));
         assertTrue(report.contains("Auth-A (ACC-001): PARTIALLY_SETTLED hold=200.00 settled=185.00"));
         assertTrue(report.contains("Auth-B (ACC-001): DECLINED hold=90.00 settled=0.00"));
     }
 
     @Test
     void reportDistinguishesPreFeeAndPostFeeBalances() {
-        // D2 line: final projection 225.00, fee 25.00, pre-fee -370.00.
+        // D2 line: final projection 250.00 (fee charged then compensated),
+        // fee 25.00, pre-fee -370.00.
         assertTrue(report.contains(
                 "OVERDRAFT FEE with value date today: 25.00 — pre-fee balance was -370.00"));
-        assertTrue(report.contains("closing ledger balance (final projection): 225.00"));
+        assertTrue(report.contains("closing ledger balance (final projection): 250.00"));
         // Point-in-time trace proves WHEN each fee was derived.
         assertTrue(report.contains("assessed on " + Scenario.day(5)
                 + ": ACC-001 value date " + Scenario.day(2) + " pre-fee balance -370.00 -> fee 25.00"));
+    }
+
+    @Test
+    void reportShowsFeeCompensationsWithBothDates() {
+        // Every charged fee is compensated on the Day-6 evening; the report
+        // shows the compensation's value date AND derivation date.
+        assertTrue(report.contains("OVERDRAFT FEE COMPENSATED with value date today: +25.00"));
+        assertTrue(report.contains("compensated on " + Scenario.day(6)
+                + ": ACC-001 value date " + Scenario.day(2)
+                + " -> fee reversal +25.00"));
+        assertEquals(3, result.feeCompensations().size());
     }
 
     @Test

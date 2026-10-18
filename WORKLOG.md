@@ -529,3 +529,51 @@ WORKLOG); (D) final verification and focused commits.
 - Replay re-run: figures unchanged (ACC-001 390.93, fees 3x25.00 discovered
   2026-01-05, interest 0.93; ACC-002 10.008, interest 0.008; Auth-A
   PARTIALLY_SETTLED, Auth-B DECLINED, E6 rejected).
+
+---
+
+# Phase 8 — final acceptance review (policy change driven by requirement hierarchy)
+
+## 2026-10-18 19:49 IST — Baseline and hierarchy analysis
+
+- Repo clean at `7491730`. Baseline: `mvn clean test` -> 87 tests, 0 failures.
+- Established the requirement hierarchy explicitly: (1) explicit assignment
+  requirements; (2) acceptance criteria — the assignment itself says some are
+  intentionally incorrect and must be evaluated, so they are NOT automatically
+  binding; (3) ambiguities to resolve; (4) chosen policies.
+- **Key finding against my own earlier work**: "assessed fees are immutable and
+  never compensated" was a phase-1 CHOSEN policy, not a requirement. No tier-1
+  requirement mandates fee persistence after the causing debit is reversed:
+  append-only applies to EVENTS and ENTRIES (a compensating fee-reversal entry
+  preserves both), and fee derivation must be replayable/idempotent (a
+  deterministic reconciliation satisfies both). The reviewer's point stands:
+  rejecting criterion 6 because of a policy I chose was circular.
+- **Decision**: adopt deterministic fee RECONCILIATION with append-only
+  compensation. At every assessment boundary, the desired fee set is recomputed
+  from non-fee entries (same sequential, fee-participating semantics); newly
+  negative dates are charged (once per account-date ever); already-charged dates
+  whose corrected books are no longer negative receive a FEE_REVERSAL
+  compensation entry valued on the original fee's value date. Original fee
+  entries are never mutated or deleted; each fee is charged at most once and
+  compensated at most once (no re-charge after compensation — documented).
+- Comparison recorded (REJECTED.md / AMBIGUITIES.md #10): persist-forever vs
+  compensate vs full-recompute. Compensation satisfies criterion 6 in net terms
+  while keeping the complete audit trail; full recompute discards point-in-time
+  history; persist-forever fails criterion 6 without a tier-1 justification.
+- Criterion 2 reinterpretation (documented in REJECTED.md): "exactly one fee
+  ... on Day 2" read as value-date/idempotency claim (exactly one fee ever
+  assessed FOR Day 2) is TRUE; read as a totality claim (one fee overall) is
+  false — three fees are assessed on the Day-5 evening under both old and new
+  policy.
+- Expected figure changes under the new policy (derived by hand BEFORE coding):
+  fees charged -25 x3 (valued D2/D4/D5, derived D5 evening), compensated +25 x3
+  (same value dates, derived D6 evening); final ACC-001 closings
+  250.00/250.00/650.00/465.00/465.00/465.00 pre-capitalization; interest bases
+  250/250/650/465/465/465 -> accruals 0.10/0.10/0.26/0.19/0.19/0.19 (650x0.0004
+  =0.2600; 465x0.0004=0.1860 -> HALF_UP 0.19) -> capitalized 1.03 -> final
+  466.03. ACC-002 unchanged (10.008). Net cumulative fees 0.00.
+- CONSEQUENCE for the deliberate-failure test: under fee compensation, the final
+  Day-2 closing (250.00) equals the as-known-on-Day-2 value, so the old
+  intentional failure would PASS. It must be re-aimed at the new naive
+  assumption: "an assessed fee remains effective forever" (truncated stream
+  without E9 -> D2 = 225.00; full stream -> D2 = 250.00).

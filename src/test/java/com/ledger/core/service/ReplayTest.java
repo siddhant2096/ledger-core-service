@@ -33,11 +33,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <p>ACC-001 (AED) effective entries: E1 +1200.00@D1, E2 -950.00@D1,
  * E5 -185.00@D4 (Auth-A settlement), E7 -620.00@D2 (processed D5),
  * E9 +620.00@D2 (reversal compensation, processed D6), fees -25.00 valued on
- * D2/D4/D5 (assessed on the evening of D5), interest +0.93@D6. Specification
- * "Day n" maps to business date 2026-01-0n (see {@link Scenario#day}).
+ * D2/D4/D5 (assessed on the evening of D5, when those dates were genuinely
+ * negative), fee compensations +25.00 valued on D2/D4/D5 (derived on the D6
+ * evening, when E9's correction left no date overdrawn), interest +1.03@D6.
+ * Specification "Day n" maps to business date 2026-01-0n (see
+ * {@link Scenario#day}).
  *
- * <p>Final value-date closings (post-fee, interest only on D6):
- * D1 250.00, D2 225.00, D3 625.00, D4 415.00, D5 390.00, D6 390.93.
+ * <p>Final value-date closings (net of fees and compensations, interest only
+ * on D6): D1 250.00, D2 250.00, D3 650.00, D4 465.00, D5 465.00, D6 466.03.
  *
  * <p>ACC-002 (BHD): E10 instalments 3.333 + 3.333 + 3.334 = 10.000@D5;
  * accruals 0.004 (D5) + 0.004 (D6) = 0.008 capitalized; final 10.008.
@@ -96,11 +99,11 @@ class ReplayTest {
     @Test
     void finalDailyClosingsMatchHandDerivation() {
         assertEquals(aed("250.00"), closing(acc001, 1));   // 1200 - 950
-        assertEquals(aed("225.00"), closing(acc001, 2));   // 250 - 620 + 620 - 25 fee
-        assertEquals(aed("625.00"), closing(acc001, 3));   // 225 + 400
-        assertEquals(aed("415.00"), closing(acc001, 4));   // 625 - 185 - 25 fee
-        assertEquals(aed("390.00"), closing(acc001, 5));   // 415 - 25 fee
-        assertEquals(aed("390.93"), closing(acc001, 6));   // 390 + 0.93 interest
+        assertEquals(aed("250.00"), closing(acc001, 2));   // 250 - 620 + 620 - 25 fee + 25 compensation
+        assertEquals(aed("650.00"), closing(acc001, 3));   // 250 + 400
+        assertEquals(aed("465.00"), closing(acc001, 4));   // 650 - 185 (fee -25 + 25 compensation net 0)
+        assertEquals(aed("465.00"), closing(acc001, 5));   // unchanged
+        assertEquals(aed("466.03"), closing(acc001, 6));   // 465 + 1.03 interest
         assertEquals(bhd("0.000"), closing(acc002, 4));
         assertEquals(bhd("10.000"), closing(acc002, 5));   // 3.333 + 3.333 + 3.334
         assertEquals(bhd("10.008"), closing(acc002, 6));   // + 0.008 interest
@@ -108,10 +111,12 @@ class ReplayTest {
 
     @Test
     void e7RewritesDay2HistoryWithoutTouchingTheStream() {
-        // Without E7/E9 the D2 closing would be 250.00. The replayed D2 closing
-        // is 225.00 because E7 (-620@D2) and E9 (+620@D2) and the D2 fee
-        // (-25@D2) are all part of the complete stream. E7 itself remains,
-        // unmutated, with processing date D5 and value date D2.
+        // Point-in-time at the D5 evening, E7 (-620@D2) drove Day 2 to -370.00
+        // and triggered the Day-2 fee. In the final projection (with E9's
+        // compensation and the fee compensation), Day 2 closes at 250.00 again
+        // — history was rewritten through the value dates of late events and
+        // derived entries, never by mutating E7, which remains with processing
+        // date D5 and value date D2.
         LedgerEntry e7Entry = result.entries().stream()
                 .filter(e -> e.sourceEventId().equals("E7")).findFirst().orElseThrow();
         assertEquals(aed("-620.00"), e7Entry.amount());
@@ -133,6 +138,32 @@ class ReplayTest {
     }
 
     @Test
+    void e9LeavesFeeEntriesIntactAndCompensatesThem() {
+        // The three fees assessed on the D5 evening were CORRECT given the
+        // books as then known. E9 corrects the books, so each fee is
+        // neutralized by an append-only FEE_REVERSAL entry valued on the
+        // original fee's value date and derived on the D6 evening. The fee
+        // entries themselves are never modified or deleted.
+        List<LedgerEntry> fees = result.entries().stream()
+                .filter(e -> e.kind() == EntryKind.FEE_OVERDRAFT).toList();
+        assertEquals(3, fees.size());
+        List<LedgerEntry> compensations = result.entries().stream()
+                .filter(e -> e.kind() == EntryKind.FEE_REVERSAL).toList();
+        assertEquals(3, compensations.size());
+        for (int i = 0; i < 3; i++) {
+            assertEquals(fees.get(i).valueDate(), compensations.get(i).valueDate());
+            assertEquals(day(6), compensations.get(i).derivedOnDate());
+            assertEquals(fees.get(i).amount().negate(), compensations.get(i).amount());
+        }
+        // Net effect: fees return to their pre-E7 value (zero) and every daily
+        // balance returns to its pre-E7 value — criterion 6 in net terms, with
+        // the full charge+compensation history preserved in the entry list.
+        assertEquals(aed("250.00"), closing(acc001, 2));
+        assertEquals(aed("465.00"), closing(acc001, 4));
+        assertEquals(aed("465.00"), closing(acc001, 5));
+    }
+
+    @Test
     void authZSettlementIsRejectedAndPostsNothing() {
         Outcome outcome = result.outcomeOf("E6");
         assertInstanceOf(Outcome.Rejected.class, outcome);
@@ -141,8 +172,9 @@ class ReplayTest {
         assertEquals(0, result.entries().stream().filter(e -> e.sourceEventId().equals("E6")).count());
         assertEquals(null, result.authorizations().get("Auth-Z"));
         // Funds did not leave the account: D4 closing reflects only the
-        // Auth-A settlement (625 - 185 - 25 fee = 415.00).
-        assertEquals(aed("415.00"), closing(acc001, 4));
+        // Auth-A settlement (650 - 185 = 465.00; fees net to zero after
+        // compensation), NOT 285.00 (which would wrongly include E6's -180.00).
+        assertEquals(aed("465.00"), closing(acc001, 4));
     }
 
     @Test
@@ -196,29 +228,26 @@ class ReplayTest {
                 feeEntries.stream().map(LedgerEntry::valueDate).toList());
         assertEquals(List.of(day(5), day(5), day(5)),
                 feeEntries.stream().map(LedgerEntry::derivedOnDate).toList());
-    }
-
-    @Test
-    void e9DoesNotRemoveAssessedFees() {
-        // Chosen policy: fee entries are immutable once derived. E9 restores
-        // the pre-fee D2 balance to +250.00, yet the D2 fee stays, so the
-        // final D2 closing is 225.00, NOT the pre-E7 250.00.
-        assertEquals(aed("225.00"), closing(acc001, 2));
-        assertEquals(3, result.feeTrace().size());
+        // Exactly one fee was ever assessed FOR Day 2 (criterion 2's
+        // value-date reading): re-examination on later evenings never
+        // duplicated it, even after E9.
+        assertEquals(1, feeEntries.stream().filter(e -> e.valueDate().equals(day(2))).count());
     }
 
     @Test
     void interestAccruesOnPositivePostFeeBalancesOnly() {
         List<DailyAccrual> accruals = result.interestTrace().stream()
                 .filter(a -> a.accountId().equals("ACC-001")).toList();
-        // Bases are the post-fee closings: 250, 225, 625, 415, 390, 390.
-        // x 0.0004, HALF_UP to 2dp: 0.10, 0.09, 0.25, 0.17 (0.1660), 0.16 (0.1560), 0.16.
+        // Bases are the final post-fee, post-compensation closings:
+        // 250, 250, 650, 465, 465, 465.
+        // x 0.0004, HALF_UP to 2dp: 0.10, 0.10, 0.26 (0.2600), 0.19 (0.1860),
+        // 0.19, 0.19.
         assertEquals(aed("0.10"), accruals.get(0).accrual());
-        assertEquals(aed("0.09"), accruals.get(1).accrual());
-        assertEquals(aed("0.25"), accruals.get(2).accrual());
-        assertEquals(aed("0.17"), accruals.get(3).accrual());
-        assertEquals(aed("0.16"), accruals.get(4).accrual());
-        assertEquals(aed("0.16"), accruals.get(5).accrual());
+        assertEquals(aed("0.10"), accruals.get(1).accrual());
+        assertEquals(aed("0.26"), accruals.get(2).accrual());
+        assertEquals(aed("0.19"), accruals.get(3).accrual());
+        assertEquals(aed("0.19"), accruals.get(4).accrual());
+        assertEquals(aed("0.19"), accruals.get(5).accrual());
         assertEquals(day(1), accruals.get(0).date());
         assertEquals(day(6), accruals.get(5).date());
         // ACC-002: zero balance accrues nothing on D1-D4.
@@ -233,14 +262,14 @@ class ReplayTest {
 
     @Test
     void capitalizedInterestEqualsSumOfRoundedDailyAccrualsExactly() {
-        // ACC-001: 0.10+0.09+0.25+0.17+0.16+0.16 = 0.93.
-        // Note: rounding the aggregate (2295.00 x 0.0004 = 0.918 -> 0.92) would
+        // ACC-001: 0.10+0.10+0.26+0.19+0.19+0.19 = 1.03.
+        // Note: rounding the aggregate (2740.00 x 0.0004 = 1.096 -> 1.10) would
         // give a DIFFERENT answer; the policy is sum-of-rounded-dailies, so no
         // remainder ever exists to discard.
         LedgerEntry interest001 = result.entries().stream()
                 .filter(e -> e.kind() == EntryKind.INTEREST_CAPITALIZATION
                         && e.accountId().equals("ACC-001")).findFirst().orElseThrow();
-        assertEquals(aed("0.93"), interest001.amount());
+        assertEquals(aed("1.03"), interest001.amount());
         assertEquals(day(6), interest001.valueDate());
 
         LedgerEntry interest002 = result.entries().stream()
@@ -283,6 +312,7 @@ class ReplayTest {
         ReplayResult again = Scenario.replay();
         assertEquals(result.entries(), again.entries());
         assertEquals(result.feeTrace(), again.feeTrace());
+        assertEquals(result.feeCompensations(), again.feeCompensations());
         assertEquals(result.interestTrace(), again.interestTrace());
         assertEquals(result.authorizations(), again.authorizations());
         assertEquals(result.outcomes(), again.outcomes());

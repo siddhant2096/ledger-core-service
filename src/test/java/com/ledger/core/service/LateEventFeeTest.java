@@ -22,38 +22,39 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 
 /**
  * Focused regression test for late back-valued events interacting with the
- * fee lifecycle (E10 alone cannot prove this: its BHD account never goes
- * negative).
+ * fee lifecycle: charge when negative, append-only compensation when the
+ * corrected books no longer show an overdraft (E10 alone cannot prove any of
+ * this: its BHD account never goes negative).
  *
  * <p>Stream (all AED, account A; Day n = 2026-01-0n):
  * <pre>
  *   X1  proc D1, value D1: CREDIT 100.00
  *   X2  proc D1, value D1: DEBIT  120.00   -> D1 = -20.00
- *   X3  proc D2, value D2: CREDIT 200.00   -> D2 = -45.00 + 200.00 = 155.00
- *   X4  proc D4, value D1: CREDIT 100.00   (LATE, into ALREADY-ASSESSED D1)
- *   X5  proc D5, value D3: DEBIT  300.00   (LATE, makes UNASSESSED D3 negative)
+ *   X3  proc D2, value D2: CREDIT 200.00
+ *   X4  proc D4, value D1: CREDIT 100.00   (LATE, into ALREADY-CHARGED D1)
+ *   X5  proc D5, value D3: DEBIT  300.00   (LATE, makes UNCHARGED D3 negative)
  *   X6  proc D5, value D4: CREDIT 300.00   (keeps D4+ non-negative)
  * </pre>
  *
- * <p>Derived expectations:
+ * <p>Derived expectations under the reconciliation policy:
  * <ul>
- *   <li>Evening D1: D1 = 100.00 - 120.00 = -20.00 -> fee F1 = -25.00, valued
- *       D1, derived D1. D1 becomes -45.00.</li>
- *   <li>Evenings D2/D3 (run when the processing date advances to D4): D2 =
- *       155.00, D3 = 155.00 -> no fees.</li>
- *   <li>Evening D4 (run when the date advances to D5): X4 is now in the books,
- *       so D1 = 55.00, D2 = 255.00, D3 = 255.00, D4 = 255.00 -> no NEW fees;
- *       F1 is already assessed and is NOT reconsidered, refunded, or
- *       duplicated, even though D1's reconstructed balance is now
- *       POSITIVE.</li>
- *   <li>Evening D5 (window-end boundary): X5 makes D3 = 255.00 - 300.00 =
- *       -45.00 -> fee F2 = -25.00, valued D3, derived D5 (D3 was examined on
- *       earlier evenings, found positive, left unmarked, and is now
- *       reconsidered exactly once). D4 = -45 - 25 + 300 = 230.00 -> no fee.</li>
- *   <li>Final value-date projections: D1 55.00, D2 255.00, D3 -70.00,
- *       D4 230.00, D5 230.00. Interest: 55 x .0004 = .0220 -> 0.02;
- *       255 -> 0.1020 -> 0.10; D3 negative -> 0.00; 230 -> 0.0920 -> 0.09
- *       (x3) = capitalized 0.39 on D6 -> D6 = 230.39.</li>
+ *   <li>Evening D1 (runs when the processing date advances to D2): D1 =
+ *       100 - 120 = -20.00 -> fee F1 = -25.00, valued D1, derived D1.</li>
+ *   <li>Evenings D2/D3 (run when the date advances to D4, BEFORE X4 is
+ *       applied): books without X4 give D1 = -20.00 -> F1 still supported,
+ *       retained. D2 = 155.00, D3 = 155.00 -> no fees.</li>
+ *   <li>Evening D4 (runs when the date advances to D5): X4 is now in the
+ *       books; the corrected D1 = -20.00 + 100.00 = 80.00 is NOT overdrawn ->
+ *       F1 is COMPENSATED: +25.00 valued D1, derived D4. The original F1 entry
+ *       is retained untouched.</li>
+ *   <li>Evenings D5/D6 (window-end boundary): X5 makes D3 = 280.00 - 300.00 =
+ *       -20.00 -> fee F2 = -25.00, valued D3, derived D5 (D3 was examined on
+ *       earlier evenings, found positive, never charged, and is now charged
+ *       exactly once). D4 = -45.00 + 300.00 = 255.00 -> no fee.</li>
+ *   <li>Final value-date projections: D1 80.00 (100-120-25+25+100), D2 280.00,
+ *       D3 -45.00 (280-300-25), D4 255.00, D5 255.00. Interest: 80x.0004=.0320
+ *       -> 0.03; 280 -> .1120 -> 0.11; D3 negative -> 0.00; 255 -> .1020 ->
+ *       0.10 (x3); capitalized 0.44 -> D6 = 255.44.</li>
  * </ul>
  */
 class LateEventFeeTest {
@@ -119,43 +120,47 @@ class LateEventFeeTest {
         FeeAssessment f2 = result.feeTrace().get(1);
         assertEquals(Scenario.day(3), f2.valueDate());        // fee belongs to D3
         assertEquals(Scenario.day(5), f2.assessedOnDate());   // discovered only on D5 evening
-        assertEquals(aed("-45.00"), f2.preFeeBalance());
+        assertEquals(aed("-20.00"), f2.preFeeBalance());
     }
 
     @Test
-    void alreadyAssessedFeeSurvivesALateEventThatMakesItsDatePositive() {
-        // X4 turns D1's reconstructed balance positive (55.00), yet F1 remains:
-        // exactly one fee entry per charged date, no refund, no duplicate.
+    void chargedFeeIsCompensatedWhenALateEventCorrectsItsDate() {
+        // F1's original entry SURVIVES (append-only), and is neutralized by
+        // exactly one FEE_REVERSAL entry valued on D1, derived on the D4
+        // evening — the first boundary after X4 corrected D1.
         List<LedgerEntry> feeEntries = result.entries().stream()
                 .filter(e -> e.kind() == EntryKind.FEE_OVERDRAFT).toList();
-        assertEquals(2, feeEntries.size());
-        assertEquals(1, feeEntries.stream()
-                .filter(e -> e.valueDate().equals(Scenario.day(1))).count());
-        // D1's final projection is POSITIVE while carrying the fee — the fee
-        // was triggered by the books as known on the D1 evening, not by the
-        // final reconstructed balance.
-        assertEquals(aed("55.00"), closing(1));
+        assertEquals(2, feeEntries.size()); // F1 (D1) and F2 (D3) both retained
+        List<LedgerEntry> reversals = result.entries().stream()
+                .filter(e -> e.kind() == EntryKind.FEE_REVERSAL).toList();
+        assertEquals(1, reversals.size());
+        assertEquals(aed("25.00"), reversals.getFirst().amount());
+        assertEquals(Scenario.day(1), reversals.getFirst().valueDate());
+        assertEquals(Scenario.day(4), reversals.getFirst().derivedOnDate());
+        assertEquals(1, result.feeCompensations().size());
+        // D1's final projection is positive and the fee nets to zero.
+        assertEquals(aed("80.00"), closing(1));
     }
 
     @Test
-    void unassessedHistoricalDayIsReconsideredExactlyOnce() {
-        // D3 was examined on the D3/D4 evenings (positive -> unmarked) and is
-        // reconsidered on the D5 evening after X5: charged exactly once.
+    void unchargedHistoricalDayIsAssessedExactlyOnce() {
+        // D3 was examined on the D3/D4 evenings (positive -> never charged) and
+        // is charged exactly once on the D5 evening after X5.
         assertEquals(1, result.entries().stream()
                 .filter(e -> e.kind() == EntryKind.FEE_OVERDRAFT
                         && e.valueDate().equals(Scenario.day(3))).count());
-        assertEquals(aed("-70.00"), closing(3)); // 255 - 300 - 25
+        assertEquals(aed("-45.00"), closing(3)); // 280 - 300 - 25
     }
 
     @Test
     void finalValueDateProjectionMatchesDerivation() {
-        assertEquals(aed("55.00"), closing(1));    // 100 - 120 - 25 + 100
-        assertEquals(aed("255.00"), closing(2));   // 55 + 200
-        assertEquals(aed("-70.00"), closing(3));   // 255 - 300 - 25
-        assertEquals(aed("230.00"), closing(4));   // -70 + 300
-        assertEquals(aed("230.00"), closing(5));
-        // Interest: 0.02 + 0.10 + 0.00 + 0.09 + 0.09 + 0.09 = 0.39, capitalized
-        // once on D6.
-        assertEquals(aed("230.39"), closing(6));
+        assertEquals(aed("80.00"), closing(1));    // 100 - 120 - 25 + 25 + 100
+        assertEquals(aed("280.00"), closing(2));   // 80 + 200
+        assertEquals(aed("-45.00"), closing(3));   // 280 - 300 - 25
+        assertEquals(aed("255.00"), closing(4));   // -45 + 300
+        assertEquals(aed("255.00"), closing(5));
+        // Interest: 0.03 + 0.11 + 0.00 + 0.10 + 0.10 + 0.10 = 0.44,
+        // capitalized once on D6.
+        assertEquals(aed("255.44"), closing(6));
     }
 }

@@ -2,6 +2,7 @@ package com.ledger.core.service.application;
 
 import com.ledger.core.service.application.ReplayResult.DailyAccrual;
 import com.ledger.core.service.application.ReplayResult.FeeAssessment;
+import com.ledger.core.service.application.ReplayResult.FeeCompensation;
 import com.ledger.core.service.application.ReplayResult.Outcome;
 import com.ledger.core.service.application.ReplayResult.SkippedFeeAssessment;
 import com.ledger.core.service.domain.account.Account;
@@ -20,8 +21,10 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -43,11 +46,16 @@ import java.util.Set;
  *       2026-01-02) rewrites historical projections without mutating any
  *       event.</li>
  *   <li>Evening boundary: whenever the processing date advances (and once at
- *       the end of the window), overdraft fees are assessed for every value
- *       date up to the completed date whose pre-fee closing balance is
- *       negative and that has not been fee-assessed before (idempotency key:
- *       account + value date). Fee entries are immutable once derived; later
- *       reversals never remove them.</li>
+ *       the end of the window), overdraft fees are RECONCILED: the desired fee
+ *       set is recomputed deterministically from all non-fee entries (same
+ *       sequential, fee-participating semantics as a fresh assessment), newly
+ *       negative account-dates are charged (at most once per account-date,
+ *       ever), and already-charged dates whose corrected books no longer show
+ *       an overdraft receive an append-only FEE_REVERSAL compensation entry
+ *       valued on the original fee's value date. Fee entries are never mutated
+ *       or deleted; each fee is charged at most once and compensated at most
+ *       once (a compensated date is never re-charged). See AMBIGUITIES.md
+ *       #1/#10/#11/#28.</li>
  *   <li>Last lifecycle boundary: interest is capitalized at the window end.
  *       Each day's accrual is the post-fee closing balance x
  *       {@link #DAILY_RATE}, rounded HALF_UP to the account currency's scale
@@ -133,8 +141,11 @@ public final class LedgerEngine {
         Map<String, Authorization> authorizations = new LinkedHashMap<>();
         List<FeeAssessment> feeTrace = new ArrayList<>();
         List<SkippedFeeAssessment> skippedFees = new ArrayList<>();
+        List<FeeCompensation> feeCompensations = new ArrayList<>();
         List<DailyAccrual> interestTrace = new ArrayList<>();
-        Set<String> assessedFeeDays = new HashSet<>(); // "accountId|valueDate"
+        Set<String> chargedFeeDays = new LinkedHashSet<>();      // "accountId|valueDate", ever charged
+        Set<String> compensatedFeeDays = new LinkedHashSet<>();  // charged and later compensated
+        Set<String> skippedFeeDays = new HashSet<>();            // negative but currency unconfigured
         Set<String> reversedEventIds = new HashSet<>();
         Set<String> seenEventIds = new HashSet<>();
         long[] sequence = {0};
@@ -148,7 +159,8 @@ public final class LedgerEngine {
                 LocalDate first = lastProcessedDate == null ? windowStart : lastProcessedDate;
                 for (LocalDate evening = first; evening.isBefore(envelope.processingDate());
                      evening = evening.plusDays(1)) {
-                    assessFees(evening, entries, feeTrace, skippedFees, assessedFeeDays, sequence);
+                    reconcileFees(evening, entries, feeTrace, skippedFees, feeCompensations,
+                            chargedFeeDays, compensatedFeeDays, skippedFeeDays, sequence);
                 }
                 lastProcessedDate = envelope.processingDate();
             }
@@ -160,12 +172,13 @@ public final class LedgerEngine {
         // capitalize interest as the last derived entries of the window.
         LocalDate first = lastProcessedDate == null ? windowStart : lastProcessedDate;
         for (LocalDate evening = first; !evening.isAfter(windowEnd); evening = evening.plusDays(1)) {
-            assessFees(evening, entries, feeTrace, skippedFees, assessedFeeDays, sequence);
+            reconcileFees(evening, entries, feeTrace, skippedFees, feeCompensations,
+                    chargedFeeDays, compensatedFeeDays, skippedFeeDays, sequence);
         }
         capitalizeInterest(entries, interestTrace, sequence);
 
         return new ReplayResult(accounts, log, outcomes, entries, authorizations, feeTrace,
-                skippedFees, interestTrace);
+                skippedFees, feeCompensations, interestTrace);
     }
 
     // ------------------------------------------------------------------
@@ -400,62 +413,128 @@ public final class LedgerEngine {
     // ------------------------------------------------------------------
 
     /**
-     * Evening fee assessment for a completed processing date. For every value
-     * date v in the window up to that date that has never been fee-assessed,
-     * the pre-fee closing balance (which already includes all previously
-     * derived fee entries) is computed; if negative, exactly one fee entry is
-     * derived with value date v — in the account's own currency and only if
-     * that currency has an explicitly configured fee. A negative account-date
-     * in an UNCONFIGURED currency is recorded as a {@link SkippedFeeAssessment}
-     * (visible, audited) and no fee is posted. Because historical value dates
-     * are re-examined whenever new events arrive, a late back-valued debit
-     * correctly creates a fee for its value date — but never twice
-     * (idempotency key account|valueDate), and existing fees are never
-     * removed.
+     * Evening fee RECONCILIATION for a completed processing date.
+     *
+     * <p>For each account, the desired fee set is recomputed from scratch over
+     * all NON-fee entries (POSTING / INSTALMENT_POSTING / REVERSAL_COMPENSATION)
+     * using the same sequential semantics as a fresh assessment: value dates in
+     * ascending order, each desired fee participating in later dates' bases.
+     * Then, deterministically:
+     *
+     * <ol>
+     *   <li>Every previously charged, not-yet-compensated fee whose date is no
+     *       longer desired (the corrected books do not show an overdraft for
+     *       it) is COMPENSATED: an append-only FEE_REVERSAL entry of the
+     *       opposite sign, valued on the ORIGINAL fee's value date, derived on
+     *       this boundary date. The original fee entry is never mutated or
+     *       deleted.</li>
+     *   <li>Every desired date never charged before is charged exactly once
+     *       (idempotency key account|valueDate). A date once charged and later
+     *       compensated is NEVER re-charged — "assess once per account per
+     *       day" is read as one fee lifecycle per account-date
+     *       (AMBIGUITIES.md #28).</li>
+     *   <li>A negative date in a currency with no configured fee produces a
+     *       {@link SkippedFeeAssessment} once (audited, no entry).</li>
+     * </ol>
+     *
+     * <p>Because reconciliation is a pure function of the entries list plus the
+     * (charged, compensated) lifecycle sets, replay is deterministic, and a
+     * back-valued reversal (E9) correctly neutralizes the fees its target
+     * caused — restoring pre-E7 balances in net terms while preserving the
+     * complete fee history (charge + compensation) in the entry list.
      */
-    private void assessFees(LocalDate processingDate,
-                            List<LedgerEntry> entries,
-                            List<FeeAssessment> feeTrace,
-                            List<SkippedFeeAssessment> skippedFees,
-                            Set<String> assessedFeeDays,
-                            long[] sequence) {
+    private void reconcileFees(LocalDate processingDate,
+                               List<LedgerEntry> entries,
+                               List<FeeAssessment> feeTrace,
+                               List<SkippedFeeAssessment> skippedFees,
+                               List<FeeCompensation> feeCompensations,
+                               Set<String> chargedFeeDays,
+                               Set<String> compensatedFeeDays,
+                               Set<String> skippedFeeDays,
+                               long[] sequence) {
         // Clamp at the window end: value dates beyond the window cannot be
         // posted at all (rejected at ingestion), but a late out-of-window
         // processing date must not trigger pointless assessment loops.
         LocalDate effective = processingDate.isAfter(windowEnd) ? windowEnd : processingDate;
+        List<LocalDate> dates = BusinessDates.datesBetween(windowStart, effective);
         for (Account account : accounts) {
-            for (LocalDate v : BusinessDates.datesBetween(windowStart, effective)) {
-                String key = account.id() + "|" + v;
-                if (assessedFeeDays.contains(key)) {
-                    continue; // decision already made for this account-date: idempotent
-                }
-                Money preFeeBalance = closingBalance(entries, account, v);
-                if (preFeeBalance.isNegative()) {
-                    // Mark only when a fee DECISION is made (charge or
-                    // documented skip): a date that is currently non-negative
-                    // must be RE-EXAMINED after later events arrive (a late
-                    // back-valued debit can make a past date negative).
-                    // Exactly one fee per account-date is guaranteed by the key.
-                    assessedFeeDays.add(key);
-                    Money configuredFee = overdraftFees.get(account.currency());
-                    if (configuredFee == null) {
-                        // No silent cross-currency fee and no silent omission:
-                        // the skip is part of the replay's audit trace.
-                        skippedFees.add(new SkippedFeeAssessment(account.id(), v, processingDate,
-                                preFeeBalance, "NO_FEE_CONFIGURED_FOR_CURRENCY "
-                                + account.currency()));
-                        continue;
+            Money configuredFee = overdraftFees.get(account.currency());
+            // Pass 1: desired fee set from non-fee entries, sequential with
+            // participation of fees that WILL be effective after this boundary
+            // (never-charged-and-negative -> will charge; charged-uncompensated
+            // -and-negative -> stays; charged-and-compensated -> never returns).
+            Money base = account.openingBalance();
+            Set<String> desired = new HashSet<>();
+            Map<String, Money> desiredPreFeeBases = new HashMap<>();
+            for (LocalDate v : dates) {
+                for (LedgerEntry e : entries) {
+                    if (e.accountId().equals(account.id()) && e.valueDate().equals(v)
+                            && isFinancialKind(e.kind())) {
+                        base = base.add(e.amount());
                     }
-                    Money fee = configuredFee.negate();
-                    String feeId = "FEE-" + account.id() + "-" + v;
-                    appendEntry(entries, sequence, feeId, account.id(), fee, v, processingDate,
-                            EntryKind.FEE_OVERDRAFT,
-                            "Overdraft fee for " + v + " (balance " + preFeeBalance + ")");
-                    feeTrace.add(new FeeAssessment(account.id(), v, processingDate, preFeeBalance,
+                }
+                String key = account.id() + "|" + v;
+                if (base.isNegative()) {
+                    if (configuredFee == null) {
+                        if (skippedFeeDays.add(key)) {
+                            skippedFees.add(new SkippedFeeAssessment(account.id(), v,
+                                    processingDate, base, "NO_FEE_CONFIGURED_FOR_CURRENCY "
+                                    + account.currency()));
+                        }
+                    } else {
+                        desired.add(key);
+                        // The trace records the base BEFORE this date's own fee
+                        // (pre-fee semantics, AMBIGUITIES.md #1).
+                        desiredPreFeeBases.put(key, base);
+                        boolean willCarryFee = !(chargedFeeDays.contains(key)
+                                && compensatedFeeDays.contains(key));
+                        if (willCarryFee) {
+                            base = base.add(configuredFee.negate());
+                        }
+                    }
+                }
+            }
+            if (configuredFee == null) {
+                continue;
+            }
+            // Pass 2: compensate charged fees that are no longer supported by
+            // the corrected books. Iteration order = charge order (LinkedHashSet)
+            // = ascending value date, keeping the replay byte-deterministic.
+            for (String key : chargedFeeDays) {
+                if (!key.startsWith(account.id() + "|") || desired.contains(key)) {
+                    continue;
+                }
+                LocalDate v = LocalDate.parse(key.substring(key.indexOf('|') + 1));
+                if (compensatedFeeDays.add(key)) {
+                    appendEntry(entries, sequence, "FEE-REVERSAL-" + account.id() + "-" + v,
+                            account.id(), configuredFee, v, processingDate,
+                            EntryKind.FEE_REVERSAL,
+                            "Compensation of overdraft fee for " + v
+                                    + " (corrected books no longer show an overdraft)");
+                    feeCompensations.add(new FeeCompensation(account.id(), v, processingDate,
                             configuredFee));
                 }
             }
+            // Pass 3: charge desired dates never charged before.
+            for (LocalDate v : dates) {
+                String key = account.id() + "|" + v;
+                if (!desired.contains(key) || !chargedFeeDays.add(key)) {
+                    continue; // not negative, already charged (idempotent), or compensated
+                }
+                Money preFeeBalance = desiredPreFeeBases.get(key);
+                appendEntry(entries, sequence, "FEE-" + account.id() + "-" + v,
+                        account.id(), configuredFee.negate(), v, processingDate,
+                        EntryKind.FEE_OVERDRAFT,
+                        "Overdraft fee for " + v + " (balance " + preFeeBalance + ")");
+                feeTrace.add(new FeeAssessment(account.id(), v, processingDate, preFeeBalance,
+                        configuredFee));
+            }
         }
+    }
+
+    private static boolean isFinancialKind(EntryKind kind) {
+        return kind == EntryKind.POSTING || kind == EntryKind.INSTALMENT_POSTING
+                || kind == EntryKind.REVERSAL_COMPENSATION;
     }
 
     /**

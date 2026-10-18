@@ -27,6 +27,7 @@ public record ReplayResult(
         Map<String, Authorization> authorizations,
         List<FeeAssessment> feeTrace,
         List<SkippedFeeAssessment> skippedFees,
+        List<FeeCompensation> feeCompensations,
         List<DailyAccrual> interestTrace) {
 
     /** Outcome of processing one source event. */
@@ -53,6 +54,17 @@ public record ReplayResult(
      */
     public record SkippedFeeAssessment(String accountId, LocalDate valueDate, LocalDate assessedOnDate,
                                        Money preFeeBalance, String reason) {
+    }
+
+    /**
+     * One fee compensation: a previously assessed overdraft fee whose value
+     * date is no longer overdrawn in the corrected books is neutralized by an
+     * append-only {@code FEE_REVERSAL} entry (the original fee entry is
+     * retained; the compensation mirrors its value date and carries the
+     * processing date on which the compensation was derived).
+     */
+    public record FeeCompensation(String accountId, LocalDate valueDate, LocalDate compensatedOnDate,
+                                  Money amount) {
     }
 
     /** One day's interest accrual line, kept for the report (not a ledger entry). */

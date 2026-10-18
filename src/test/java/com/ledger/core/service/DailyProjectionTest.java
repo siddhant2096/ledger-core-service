@@ -23,7 +23,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  *
  * <pre>
  * ACC-001 entries: +1200@D1, -950@D1, -620@D2 (E7), +620@D2 (E9), +400@D3,
- *                  -185@D4 (E5), fees -25@D2/D4/D5, interest +0.93@D6.
+ *                  -185@D4 (E5), fees -25@D2/D4/D5 (charged D5 evening),
+ *                  fee compensations +25@D2/D4/D5 (derived D6 evening, after
+ *                  E9 left no date overdrawn), interest +1.03@D6.
  * Holds (processing-time): Auth-A 200.00 active D2..D3 (settled D4);
  *                          Auth-B declined (never active).
  * ACC-002 entries: +3.333/+3.333/+3.334@D5, interest +0.008@D6.
@@ -38,11 +40,11 @@ class DailyProjectionTest {
     private static final String[][] EXPECTED_AED = {
             // day, closing, activeHolds, available, accrual
             {"2026-01-01", "250.00", "0.00", "250.00", "0.10"},  // 250 x .0004 = .1000
-            {"2026-01-02", "225.00", "200.00", "25.00", "0.09"}, // 225 x .0004 = .0900
-            {"2026-01-03", "625.00", "200.00", "425.00", "0.25"}, // 625 x .0004 = .2500
-            {"2026-01-04", "415.00", "0.00", "415.00", "0.17"},  // 415 x .0004 = .1660 -> .17
-            {"2026-01-05", "390.00", "0.00", "390.00", "0.16"},  // 390 x .0004 = .1560 -> .16
-            {"2026-01-06", "390.93", "0.00", "390.93", "0.16"},  // +0.93 capitalized
+            {"2026-01-02", "250.00", "200.00", "50.00", "0.10"}, // fee -25 + compensation +25 net 0
+            {"2026-01-03", "650.00", "200.00", "450.00", "0.26"}, // 650 x .0004 = .2600
+            {"2026-01-04", "465.00", "0.00", "465.00", "0.19"},  // 465 x .0004 = .1860 -> .19
+            {"2026-01-05", "465.00", "0.00", "465.00", "0.19"},
+            {"2026-01-06", "466.03", "0.00", "466.03", "0.19"},  // +1.03 capitalized
     };
 
     private static final String[][] EXPECTED_BHD = {

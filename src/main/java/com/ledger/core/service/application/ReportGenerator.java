@@ -2,6 +2,7 @@ package com.ledger.core.service.application;
 
 import com.ledger.core.service.application.ReplayResult.DailyAccrual;
 import com.ledger.core.service.application.ReplayResult.FeeAssessment;
+import com.ledger.core.service.application.ReplayResult.FeeCompensation;
 import com.ledger.core.service.application.ReplayResult.Outcome;
 import com.ledger.core.service.application.ReplayResult.SkippedFeeAssessment;
 import com.ledger.core.service.domain.account.Account;
@@ -130,6 +131,17 @@ public final class ReportGenerator {
                         .append(fee.assessedOnDate()).append("\n");
             }
         }
+        for (FeeCompensation compensation : result.feeCompensations()) {
+            if (compensation.accountId().equals(account.id()) && compensation.valueDate().equals(date)) {
+                // Append-only correction: the original fee entry is retained;
+                // this compensation neutralizes it because the corrected books
+                // no longer show an overdraft for this value date.
+                out.append("   OVERDRAFT FEE COMPENSATED with value date today: +")
+                        .append(fmt(compensation.amount()))
+                        .append(" — original fee entry retained; compensated on processing date ")
+                        .append(compensation.compensatedOnDate()).append("\n");
+            }
+        }
         out.append("   active holds: ").append(fmt(activeHolds)).append(activeHoldNames(account, date)).append("\n");
         out.append("   available balance: ").append(fmt(available)).append("\n");
         for (DailyAccrual accrual : result.interestTrace()) {
@@ -163,6 +175,13 @@ public final class ReportGenerator {
                     .append(" -> fee ").append(fmt(fee.feeAmount()))
                     .append(" (fee value date = assessed date ").append(fee.valueDate()).append(")\n");
         }
+        for (FeeCompensation compensation : result.feeCompensations()) {
+            out.append(" compensated on ").append(compensation.compensatedOnDate())
+                    .append(": ").append(compensation.accountId())
+                    .append(" value date ").append(compensation.valueDate())
+                    .append(" -> fee reversal +").append(fmt(compensation.amount()))
+                    .append(" (original fee entry retained; corrected books show no overdraft)\n");
+        }
         for (SkippedFeeAssessment skip : result.skippedFees()) {
             out.append(" assessed on ").append(skip.assessedOnDate())
                     .append(": ").append(skip.accountId())
@@ -178,7 +197,7 @@ public final class ReportGenerator {
         out.append("================================================================\n");
         for (Account account : result.accounts()) {
             Money finalBalance = LedgerEngine.closingBalance(result.entries(), account, windowEnd);
-            Money totalFees = feesValuedUpTo(account, windowEnd);
+            Money netFees = feesValuedUpTo(account, windowEnd);
             Money totalInterest = Money.zero(account.currency());
             StringBuilder daily = new StringBuilder();
             for (DailyAccrual accrual : result.interestTrace()) {
@@ -190,9 +209,13 @@ public final class ReportGenerator {
                     daily.append(accrual.date()).append("=").append(accrual.accrual().amount().toPlainString());
                 }
             }
+            Money chargedFees = feesOfKind(account, EntryKind.FEE_OVERDRAFT);
+            Money compensatedFees = feesOfKind(account, EntryKind.FEE_REVERSAL);
             out.append(" ").append(account.id()).append(" (").append(account.currency()).append(")\n");
             out.append("   final ledger balance:      ").append(fmt(finalBalance)).append("\n");
-            out.append("   cumulative overdraft fees: ").append(fmt(totalFees)).append("\n");
+            out.append("   cumulative overdraft fees: ").append(fmt(netFees))
+                    .append(" (charged ").append(fmt(chargedFees))
+                    .append(", compensated ").append(fmt(compensatedFees)).append(")\n");
             out.append("   daily interest accruals:   ").append(daily).append("\n");
             out.append("   total interest capitalized:").append(" ").append(fmt(totalInterest)).append("\n");
         }
@@ -285,12 +308,24 @@ public final class ReportGenerator {
                 && (auth.settledOnDate() == null || date.isBefore(auth.settledOnDate()));
     }
 
+    /** Net fee effect valued on/before the date: charges minus compensations. */
     private Money feesValuedUpTo(Account account, LocalDate date) {
         Money total = Money.zero(account.currency());
         for (LedgerEntry entry : result.entries()) {
-            if (entry.accountId().equals(account.id())
-                    && entry.kind() == EntryKind.FEE_OVERDRAFT
+            boolean feeKind = entry.kind() == EntryKind.FEE_OVERDRAFT
+                    || entry.kind() == EntryKind.FEE_REVERSAL;
+            if (entry.accountId().equals(account.id()) && feeKind
                     && !entry.valueDate().isAfter(date)) {
+                total = total.add(entry.amount());
+            }
+        }
+        return total;
+    }
+
+    private Money feesOfKind(Account account, EntryKind kind) {
+        Money total = Money.zero(account.currency());
+        for (LedgerEntry entry : result.entries()) {
+            if (entry.accountId().equals(account.id()) && entry.kind() == kind) {
                 total = total.add(entry.amount());
             }
         }

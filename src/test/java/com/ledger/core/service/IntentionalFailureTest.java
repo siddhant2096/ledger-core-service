@@ -20,59 +20,85 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * =====================================================================
  *
  * WHY THIS TEST FAILS:
- *   It asserts that the Day-2 (2026-01-02) closing balance of ACC-001 is
- *   IMMUTABLE once its processing date has passed — i.e. that replaying only
- *   the events known by end of Day 2 and replaying the complete stream give
- *   the same Day-2 balance. That invariant is false by design: E7 (DEBIT
- *   620.00, value date Day 2) is processed on Day 5 and E9 (its reversal) on
- *   Day 6, and the Day-2 overdraft fee of 25.00 is derived on the evening of
- *   Day 5. Under the documented projection convention (end-of-window
- *   value-date projection), the final Day-2 closing is 225.00, not 250.00.
+ *   It asserts that an overdraft fee, once assessed, keeps its financial
+ *   effect forever — i.e. that the Day-2 (2026-01-02) net fee effect as of
+ *   the Day-5 evening (−25.00) equals the final one. That invariant is false
+ *   under the documented fee-RECONCILIATION policy: E9 (processed Day 6,
+ *   valued Day 2) corrects the books, and the Day-6 evening reconciliation
+ *   appends an append-only FEE_REVERSAL compensation (+25.00 valued Day 2),
+ *   so the final net fee effect on Day 2 is 0.00.
  *
  * WHICH ASSUMPTION / INVARIANT IT EXPOSES:
- *   The naive assumption "historical daily balances are frozen once their
- *   processing date ends". The ledger's real invariant is the opposite:
- *   historical VALUE-DATE projections must reflect late-arriving events,
- *   while the event log itself stays immutable. Anyone bolting a snapshot-
- *   based cache onto this engine without invalidating historical value dates
- *   would break correctness.
+ *   The naive assumption "a derived fee entry, once posted, always keeps its
+ *   financial effect". The ledger's real invariant is subtler: entries are
+ *   immutable, but their NET effect can be neutralized by later compensation
+ *   entries. A projection cache keyed by value date that never accounts for
+ *   late compensation entries would silently keep the −25.00 fee effect.
  *
  * WHAT A NAIVE IMPLEMENTATION MIGHT INCORRECTLY CONCLUDE:
- *   A snapshot-per-processing-date implementation would conclude Day 2 =
- *   250.00 forever, would never assess the Day-2 fee, and would misprice
- *   Day-3+ interest (bases 650.00/465.00/... instead of 625.00/415.00/...).
+ *   That the Day-2 fee assessed on the Day-5 evening keeps Day 2 at −25.00 of
+ *   fees permanently — reporting stale cumulative fees (75.00 instead of net
+ *   0.00) and stale balances after E9.
  *
  * STATUS:
  *   Intentional demonstration. It is excluded from the normal suite via the
  *   JUnit tag "intentional-failure" (see pom.xml / README.md). Run it with:
  *     mvn test -Dsurefire.groups=intentional-failure -Dsurefire.excludedGroups=
+ *
+ * (History: this test originally demonstrated that late value-dated events
+ * rewrite historical projections — 250.00 vs 225.00. Under the phase-8
+ * fee-compensation policy the final Day-2 closing is again 250.00, so the
+ * demonstration was re-aimed at fee-effect permanence, which is where a naive
+ * implementation would now break. A mid-edit mistake during that re-aiming —
+ * asserting the mid-window Day-2 closing as 225.00 when E7's own −620.00
+ * makes it −395.00 — was caught by the test itself failing on the sanity
+ * line with "expected 225.00 but was -395.00"; the fee-effect formulation
+ * above is the precise one.)
  */
 @Tag("intentional-failure")
 class IntentionalFailureTest {
 
     @Test
-    void historicalBalancesAreFrozenAfterTheirProcessingDay_naiveAssumption() {
+    void assessedFeesRemainEffectiveForever_naiveAssumption() {
         Account acc001 = Scenario.accounts().getFirst();
 
-        // "End of Day 2" view: only E1, E2, E3 processed. Day-2 closing 250.00.
-        List<EventEnvelope> knownByEndOfDay2 = Scenario.events().stream()
-                .filter(e -> !e.processingDate().isAfter(Scenario.day(2)))
+        // Mid-window view: the stream WITHOUT E9 (i.e. as known through the
+        // Day-5 evening). The Day-2 fee's net effect on Day 2 is -25.00.
+        List<EventEnvelope> withoutE9 = Scenario.events().stream()
+                .filter(e -> !e.eventId().equals("E9"))
                 .toList();
-        ReplayResult earlyView = new LedgerEngine(Scenario.accounts(), Scenario.WINDOW_START,
+        ReplayResult midWindowView = new LedgerEngine(Scenario.accounts(), Scenario.WINDOW_START,
                 Scenario.WINDOW_END, Scenario.BUSINESS_ZONE, Scenario.OVERDRAFT_FEE_SCHEDULE)
-                .replay(knownByEndOfDay2);
-        Money day2AsKnownThen = LedgerEngine.closingBalance(earlyView.entries(), acc001,
-                Scenario.day(2));
-        assertEquals(Money.of("250.00", CurrencyCode.AED), day2AsKnownThen); // sanity: this holds
+                .replay(withoutE9);
+        Money day2FeeEffectMidWindow = netFeeEffectValuedOn(midWindowView, acc001, Scenario.day(2));
+        assertEquals(Money.of("-25.00", CurrencyCode.AED), day2FeeEffectMidWindow); // sanity
 
-        // Complete-stream view: Day-2 closing is 225.00 (E7 -620, E9 +620,
-        // FEE -25 all valued on Day 2). The assertion below is the naive one
-        // and FAILS — that failure is the demonstration.
+        // Complete-stream view: E9's compensation of E7 leaves no date
+        // overdrawn, so the Day-6 evening reconciliation appends a
+        // FEE_REVERSAL (+25.00 valued Day 2). The net Day-2 fee effect is
+        // 0.00, NOT -25.00. The assertion below is the naive one and FAILS —
+        // that failure is the demonstration.
         ReplayResult fullView = Scenario.replay();
-        Money day2Final = LedgerEngine.closingBalance(fullView.entries(), acc001, Scenario.day(2));
-        assertEquals(day2AsKnownThen, day2Final,
-                "INTENTIONAL FAILURE: late value-dated events (E7/E9) and the derived day-2 fee "
-                        + "rewrite the Day-2 closing from " + day2AsKnownThen + " to " + day2Final
-                        + ". Historical value-date projections are NOT frozen at processing time.");
+        Money day2FeeEffectFinal = netFeeEffectValuedOn(fullView, acc001, Scenario.day(2));
+        assertEquals(day2FeeEffectMidWindow, day2FeeEffectFinal,
+                "INTENTIONAL FAILURE: fee entries are immutable but not permanently effective — "
+                        + "the Day-6 reconciliation appended a FEE_REVERSAL, moving Day 2's net "
+                        + "fee effect from " + day2FeeEffectMidWindow + " to " + day2FeeEffectFinal
+                        + ". Derived-entry EFFECTS can be compensated by later entries.");
+    }
+
+    /** Net amount of fee and fee-reversal entries valued on the given date. */
+    private static Money netFeeEffectValuedOn(ReplayResult result, Account account,
+                                              java.time.LocalDate date) {
+        Money total = Money.zero(account.currency());
+        for (var entry : result.entries()) {
+            boolean feeKind = entry.kind() == com.ledger.core.service.domain.entry.EntryKind.FEE_OVERDRAFT
+                    || entry.kind() == com.ledger.core.service.domain.entry.EntryKind.FEE_REVERSAL;
+            if (feeKind && entry.accountId().equals(account.id())
+                    && entry.valueDate().equals(date)) {
+                total = total.add(entry.amount());
+            }
+        }
+        return total;
     }
 }

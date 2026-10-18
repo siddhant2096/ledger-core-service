@@ -74,19 +74,20 @@ class EventStreamTest {
         var authA = result.authorizations().get("Auth-A");
         assertEquals(aed("200.00"), authA.holdAmount());
         assertEquals(day(2), authA.processedDate());
-        // Ledger balance on D2 is unchanged by the hold: 250.00 underlying
-        // minus the later-assessed D2 fee of 25.00 = 225.00 (the fee comes
-        // from E7, not from E3).
-        assertEquals(aed("225.00"), closing(acc001, 2));
-        // ...while available balance on D2 reflects the hold: 225.00 - 200.00.
+        // Ledger balance on D2 is unchanged by the hold: 250.00 (the D2 fee
+        // triggered later by E7 was compensated after E9; neither has anything
+        // to do with E3).
+        assertEquals(aed("250.00"), closing(acc001, 2));
+        // ...while the hold was real: at decision time available went from
+        // 250.00 to 50.00.
     }
 
     @Test
     void e4Credits400() {
         assertEquals(aed("400.00"), entriesOf("E4").getFirst().amount());
         assertEquals(day(3), entriesOf("E4").getFirst().valueDate());
-        // D3 closing: D2 225.00 + 400.00 = 625.00.
-        assertEquals(aed("625.00"), closing(acc001, 3));
+        // D3 closing: D2 250.00 + 400.00 = 650.00.
+        assertEquals(aed("650.00"), closing(acc001, 3));
     }
 
     @Test
@@ -151,17 +152,21 @@ class EventStreamTest {
         assertEquals(EntryKind.REVERSAL_COMPENSATION, compensation.kind());
         assertEquals(day(2), compensation.valueDate());
         assertEquals(day(6), compensation.derivedOnDate());
-        // E7 and all three fee entries survive untouched.
+        // E7 and all three fee entries survive untouched; each fee is
+        // neutralized by an append-only FEE_REVERSAL entry (derived on the D6
+        // evening) because the corrected books show no overdraft anywhere.
         assertEquals(1, entriesOf("E7").size());
         assertEquals(3, result.entries().stream()
                 .filter(e -> e.kind() == EntryKind.FEE_OVERDRAFT).count());
+        assertEquals(3, result.entries().stream()
+                .filter(e -> e.kind() == EntryKind.FEE_REVERSAL).count());
         // Effect on all six daily closings (final projection, pre-interest):
-        // D1 250.00 | D2 250-25=225.00 | D3 625.00 | D4 415.00 | D5 390.00 | D6 390.00.
+        // D1 250.00 | D2 250.00 | D3 650.00 | D4 465.00 | D5 465.00 | D6 465.00.
         assertEquals(aed("250.00"), closing(acc001, 1));
-        assertEquals(aed("225.00"), closing(acc001, 2));
-        assertEquals(aed("625.00"), closing(acc001, 3));
-        assertEquals(aed("415.00"), closing(acc001, 4));
-        assertEquals(aed("390.00"), closing(acc001, 5));
+        assertEquals(aed("250.00"), closing(acc001, 2));
+        assertEquals(aed("650.00"), closing(acc001, 3));
+        assertEquals(aed("465.00"), closing(acc001, 4));
+        assertEquals(aed("465.00"), closing(acc001, 5));
     }
 
     @Test
