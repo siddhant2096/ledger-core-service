@@ -98,3 +98,24 @@ Cross-checked engine output by hand (value-date order, ACC-001):
   arithmetic and stated assumptions; plus the six actually-abandoned approaches.
 - Wrote NUMBERS.md — all constants with source (requirement vs choice) and
   halving analysis.
+- Committed documentation as `9f44c3c`.
+
+## 2026-10-18 16:05 IST — Final verification pass (clean state)
+
+- `mvn clean test` → Tests run: 45, Failures: 0, Errors: 0 — BUILD SUCCESS.
+- `mvn test -Dsurefire.groups=intentional-failure -Dsurefire.excludedGroups=` →
+  Tests run: 1, Failures: 1 — fails with exactly the documented message
+  (AED 250.00 vs AED 225.00). Expected outcome; isolated from the normal suite.
+- `mvn -q compile exec:java` → full 169-line report printed; summary figures match
+  the independent recomputation above.
+- Git identity: inherited from the existing repository configuration (prior commits
+  share the same author); no history was rewritten, no squashing performed.
+
+## Summary of actual results
+
+- ACC-001 (AED): final 390.93; fees 3 × 25.00 valued D2/D4/D5 (total 75.00);
+  interest 0.10/0.09/0.25/0.17/0.16/0.16, capitalized 0.93.
+- ACC-002 (BHD): final 10.008; instalments 3.333/3.333/3.334; interest
+  0.004/0.004, capitalized 0.008.
+- Auth-A PARTIALLY_SETTLED (185.00/200.00, residual released); Auth-B DECLINED;
+  E6 (Auth-Z) REJECTED — unknown authorization, no funds moved.
