@@ -3,6 +3,7 @@ package com.ledger.core.service;
 import com.ledger.core.service.application.LedgerEngine;
 import com.ledger.core.service.application.ReplayResult;
 import com.ledger.core.service.application.ReplayResult.Outcome;
+import com.ledger.core.service.application.Scenario;
 import com.ledger.core.service.domain.account.Account;
 import com.ledger.core.service.domain.entry.EntryKind;
 import com.ledger.core.service.domain.entry.LedgerEntry;
@@ -13,6 +14,7 @@ import com.ledger.core.service.domain.money.Money;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -32,21 +34,28 @@ class ReversalTest {
     private static final Account AED = Account.zeroBalance("A", CurrencyCode.AED);
     private static final Account BHD = Account.zeroBalance("B", CurrencyCode.BHD);
 
+    private final AtomicLong position = new AtomicLong(0);
+
+    private EventEnvelope env(String id, int processingDay, int valueDay, LedgerEvent event) {
+        return new EventEnvelope(id, position.incrementAndGet(),
+                Scenario.day(processingDay), Scenario.day(valueDay), event);
+    }
+
     private ReplayResult run(List<Account> accounts, List<EventEnvelope> events) {
-        return new LedgerEngine(accounts, 6).replay(events);
+        return new LedgerEngine(accounts, Scenario.WINDOW_START, Scenario.WINDOW_END,
+                Scenario.BUSINESS_ZONE).replay(events);
     }
 
-    private static EventEnvelope credit(String id, int day, String account, String amount, CurrencyCode c) {
-        return new EventEnvelope(id, day, day, new LedgerEvent.Credit(account, Money.of(amount, c)));
+    private EventEnvelope credit(String id, int day, String account, String amount, CurrencyCode c) {
+        return env(id, day, day, new LedgerEvent.Credit(account, Money.of(amount, c)));
     }
 
-    private static EventEnvelope debit(String id, int day, String account, String amount) {
-        return new EventEnvelope(id, day, day,
-                new LedgerEvent.Debit(account, Money.of(amount, CurrencyCode.AED)));
+    private EventEnvelope debit(String id, int day, String account, String amount) {
+        return env(id, day, day, new LedgerEvent.Debit(account, Money.of(amount, CurrencyCode.AED)));
     }
 
-    private static EventEnvelope reversal(String id, int day, String account, String targetId) {
-        return new EventEnvelope(id, day, day, new LedgerEvent.Reversal(account, targetId));
+    private EventEnvelope reversal(String id, int day, String account, String targetId) {
+        return env(id, day, day, new LedgerEvent.Reversal(account, targetId));
     }
 
     private static String reason(ReplayResult result, String eventId) {
@@ -55,10 +64,10 @@ class ReversalTest {
 
     @Test
     void failedReversalOfUnknownTargetDoesNotPoisonTheTargetId() {
-        // Day 1: reversal of X1 — X1 does not exist yet -> rejected.
-        // Day 2: X1 arrives as a real debit -> accepted.
-        // Day 3: reversal of X1 -> MUST be accepted. The day-1 rejection must
-        // not have marked X1 as reversed (the pre-fix bug did exactly that).
+        // D1: reversal of X1 — X1 does not exist yet -> rejected.
+        // D2: X1 arrives as a real debit -> accepted.
+        // D3: reversal of X1 -> MUST be accepted. The D1 rejection must not
+        // have marked X1 as reversed (the pre-fix bug did exactly that).
         ReplayResult result = run(List.of(AED), List.of(
                 reversal("R1", 1, "A", "X1"),
                 credit("X0", 2, "A", "100.00", CurrencyCode.AED),
@@ -70,12 +79,12 @@ class ReversalTest {
         assertInstanceOf(Outcome.Accepted.class, result.outcomeOf("R2"),
                 "a failed reversal must not block a later valid reversal of the same id");
 
-        // Exactly one compensation, and the day-6 balance proves the net:
-        // +100 - 40 + 40 = 100.00 (plus interest, so check the pre-interest day-5 closing).
+        // Exactly one compensation, and the balance proves the net:
+        // +100 - 40 + 40 = 100.00 (checked on D5, before interest capitalization).
         assertEquals(1, result.entries().stream()
                 .filter(e -> e.kind() == EntryKind.REVERSAL_COMPENSATION).count());
         assertEquals(Money.of("100.00", CurrencyCode.AED),
-                LedgerEngine.closingBalance(result.entries(), AED, 5));
+                LedgerEngine.closingBalance(result.entries(), AED, Scenario.day(5)));
     }
 
     @Test
@@ -87,7 +96,7 @@ class ReversalTest {
                 .filter(e -> e.kind() == EntryKind.POSTING).count();
         assertEquals(1, postingEntries); // only the credit
         assertEquals(Money.of("100.00", CurrencyCode.AED),
-                LedgerEngine.closingBalance(result.entries(), AED, 5));
+                LedgerEngine.closingBalance(result.entries(), AED, Scenario.day(5)));
     }
 
     @Test
@@ -102,7 +111,7 @@ class ReversalTest {
         assertEquals(1, result.entries().stream()
                 .filter(e -> e.kind() == EntryKind.REVERSAL_COMPENSATION).count());
         assertEquals(Money.of("100.00", CurrencyCode.AED),
-                LedgerEngine.closingBalance(result.entries(), AED, 5));
+                LedgerEngine.closingBalance(result.entries(), AED, Scenario.day(5)));
     }
 
     @Test
@@ -117,7 +126,7 @@ class ReversalTest {
         assertEquals(0, result.entries().stream()
                 .filter(e -> e.kind() == EntryKind.REVERSAL_COMPENSATION).count());
         assertEquals(Money.of("90.00", CurrencyCode.AED),
-                LedgerEngine.closingBalance(result.entries(), AED, 5));
+                LedgerEngine.closingBalance(result.entries(), AED, Scenario.day(5)));
     }
 
     @Test
@@ -127,9 +136,8 @@ class ReversalTest {
         // with "rejected means it did not happen, accounting-wise".
         ReplayResult result = run(List.of(AED), List.of(
                 credit("X0", 1, "A", "100.00", CurrencyCode.AED),
-                new EventEnvelope("X1", 2, 2,
-                        new LedgerEvent.AuthorizationRequest("A", "Auth-X",
-                                Money.of("10.00", CurrencyCode.AED))),
+                env("X1", 2, 2, new LedgerEvent.AuthorizationRequest("A", "Auth-X",
+                        Money.of("10.00", CurrencyCode.AED))),
                 reversal("R1", 3, "A", "X1"),
                 reversal("R2", 3, "A", "GHOST")));
         assertTrue(reason(result, "R1").contains("REVERSAL_TARGET_UNKNOWN"));
@@ -138,12 +146,13 @@ class ReversalTest {
 
     @Test
     void reversingDerivedFeeEntriesIsUnsupported() {
-        // The fee entry's source id is "FEE-A-D1" (derived on the evening of
-        // day 1). Attempting to reverse that id must be rejected: fees are
+        // The fee entry's source id is "FEE-A-<date>" (derived on the evening
+        // of D1). Attempting to reverse that id must be rejected: fees are
         // corrected by explicit business events, not raw reversal.
+        String feeSourceId = "FEE-A-" + Scenario.day(1);
         ReplayResult result = run(List.of(AED), List.of(
                 debit("X1", 1, "A", "10.00"),
-                reversal("R1", 2, "A", "FEE-A-D1")));
+                reversal("R1", 2, "A", feeSourceId)));
         assertTrue(reason(result, "R1").contains("REVERSAL_UNSUPPORTED_TARGET"));
     }
 
@@ -164,12 +173,12 @@ class ReversalTest {
 
     @Test
     void multiEntryInstalmentCreditIsReversedInFullAsOneCompensation() {
-        // BHD 10.000 in 3 instalments (3.333 + 3.333 + 3.334) on day 1,
-        // reversed on day 2 (value day 2). Compensation must equal the SUM of
-        // the parts — 10.000 exactly — as a single entry.
+        // BHD 10.000 in 3 instalments (3.333 + 3.333 + 3.334) on D1, reversed
+        // on D2 (value date D2). Compensation must equal the SUM of the parts
+        // — 10.000 exactly — as a single entry.
         ReplayResult result = run(List.of(BHD), List.of(
-                new EventEnvelope("X1", 1, 1,
-                        new LedgerEvent.InstalmentCredit("B", Money.of("10.000", CurrencyCode.BHD), 3)),
+                env("X1", 1, 1, new LedgerEvent.InstalmentCredit("B",
+                        Money.of("10.000", CurrencyCode.BHD), 3)),
                 reversal("R1", 2, "B", "X1")));
         assertInstanceOf(Outcome.Accepted.class, result.outcomeOf("R1"));
 
@@ -177,16 +186,16 @@ class ReversalTest {
                 .filter(e -> e.kind() == EntryKind.REVERSAL_COMPENSATION)
                 .findFirst().orElseThrow();
         assertEquals(Money.of("-10.000", CurrencyCode.BHD), compensation.amount());
-        assertEquals(2, compensation.valueDay());
+        assertEquals(Scenario.day(2), compensation.valueDate());
 
-        // Originals intact: 3 instalment postings remain; day-1 closing still
-        // 10.000; from day 2 the net is zero (no fees — never negative).
+        // Originals intact: 3 instalment postings remain; D1 closing still
+        // 10.000; from D2 the net is zero (no fees — never negative).
         assertEquals(3, result.entries().stream()
                 .filter(e -> e.sourceEventId().equals("X1")).count());
         assertEquals(Money.of("10.000", CurrencyCode.BHD),
-                LedgerEngine.closingBalance(result.entries(), BHD, 1));
+                LedgerEngine.closingBalance(result.entries(), BHD, Scenario.day(1)));
         assertEquals(Money.zero(CurrencyCode.BHD),
-                LedgerEngine.closingBalance(result.entries(), BHD, 5));
+                LedgerEngine.closingBalance(result.entries(), BHD, Scenario.day(5)));
         assertTrue(result.feeTrace().isEmpty());
     }
 }

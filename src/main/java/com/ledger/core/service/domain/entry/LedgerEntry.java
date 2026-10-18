@@ -2,6 +2,7 @@ package com.ledger.core.service.domain.entry;
 
 import com.ledger.core.service.domain.money.Money;
 
+import java.time.LocalDate;
 import java.util.Objects;
 
 /**
@@ -9,13 +10,14 @@ import java.util.Objects;
  * are what balances are computed from. Every entry carries:
  * <ul>
  *   <li>{@code sourceEventId} — the source event it derives from, or a
- *       synthetic deterministic id (e.g. {@code FEE-ACC-001-D2}) for engine
- *       generated entries, keeping the full audit trail reproducible.</li>
- *   <li>{@code valueDay} — the accounting day the entry belongs to. This is
+ *       synthetic deterministic id (e.g. {@code FEE-ACC-001-2026-01-02}) for
+ *       engine-generated entries, keeping the full audit trail
+ *       reproducible.</li>
+ *   <li>{@code valueDate} — the business date the entry belongs to. This is
  *       what historical projections filter on.</li>
- *   <li>{@code derivedOnDay} — the processing day on which the engine created
- *       the entry. For direct postings this equals the source event's
- *       processing day; for fees it is the day the assessment ran.</li>
+ *   <li>{@code derivedOnDate} — the processing date on which the engine
+ *       created the entry. For direct postings this equals the source event's
+ *       processing date; for fees it is the evening the assessment ran.</li>
  *   <li>{@code amount} — signed: credits positive, debits/fees negative.</li>
  * </ul>
  */
@@ -24,8 +26,8 @@ public record LedgerEntry(
         String sourceEventId,
         String accountId,
         Money amount,
-        int valueDay,
-        int derivedOnDay,
+        LocalDate valueDate,
+        LocalDate derivedOnDate,
         EntryKind kind,
         String description) {
 
@@ -33,6 +35,8 @@ public record LedgerEntry(
         Objects.requireNonNull(sourceEventId, "sourceEventId");
         Objects.requireNonNull(accountId, "accountId");
         Objects.requireNonNull(amount, "amount");
+        Objects.requireNonNull(valueDate, "valueDate");
+        Objects.requireNonNull(derivedOnDate, "derivedOnDate");
         Objects.requireNonNull(kind, "kind");
         Objects.requireNonNull(description, "description");
     }

@@ -2,6 +2,7 @@ package com.ledger.core.service.domain.auth;
 
 import com.ledger.core.service.domain.money.Money;
 
+import java.time.LocalDate;
 import java.util.Objects;
 
 /**
@@ -9,36 +10,38 @@ import java.util.Objects;
  * stored snapshot on each transition; nothing is mutated in place, which
  * keeps replay deterministic and every transition auditable.
  *
- * <p>{@code processedDay} is the day the authorization request was processed.
- * Holds are processing-time constructs (see AMBIGUITIES.md): a hold affects
- * available balance from its processing day onward, regardless of value date.
+ * <p>{@code processedDate} is the business date the authorization request was
+ * processed. Holds are processing-time constructs (see AMBIGUITIES.md): a hold
+ * affects available balance from its processing date onward, regardless of the
+ * request's value date.
  *
  * @param settledAmount total amount settled so far; zero until settled
- * @param settledOnDay  processing day of the settlement; {@code null} if unsettled
+ * @param settledOnDate processing date of the settlement; {@code null} if unsettled
  */
 public record Authorization(
         String id,
         String accountId,
         Money holdAmount,
-        int processedDay,
+        LocalDate processedDate,
         AuthorizationStatus status,
         Money settledAmount,
-        Integer settledOnDay) {
+        LocalDate settledOnDate) {
 
     public Authorization {
         Objects.requireNonNull(id, "id");
         Objects.requireNonNull(accountId, "accountId");
         Objects.requireNonNull(holdAmount, "holdAmount");
+        Objects.requireNonNull(processedDate, "processedDate");
         Objects.requireNonNull(status, "status");
         Objects.requireNonNull(settledAmount, "settledAmount");
     }
 
     public static Authorization decided(String id, String accountId, Money holdAmount,
-                                        int processedDay, AuthorizationStatus status) {
+                                        LocalDate processedDate, AuthorizationStatus status) {
         if (status != AuthorizationStatus.APPROVED && status != AuthorizationStatus.DECLINED) {
             throw new IllegalArgumentException("initial status must be APPROVED or DECLINED");
         }
-        return new Authorization(id, accountId, holdAmount, processedDay, status,
+        return new Authorization(id, accountId, holdAmount, processedDate, status,
                 Money.zero(holdAmount.currency()), null);
     }
 
@@ -52,14 +55,14 @@ public record Authorization(
      * settlement time (residual included): after any settlement the
      * authorization is terminal and contributes no further active hold.
      */
-    public Authorization settle(Money amount, int processingDay) {
+    public Authorization settle(Money amount, LocalDate processingDate) {
         if (!status.isSettleable()) {
             throw new IllegalStateException("Authorization " + id + " is not settleable: " + status);
         }
         AuthorizationStatus next = amount.compareTo(holdAmount) == 0
                 ? AuthorizationStatus.FULLY_SETTLED
                 : AuthorizationStatus.PARTIALLY_SETTLED;
-        return new Authorization(id, accountId, holdAmount, processedDay, next, amount, processingDay);
+        return new Authorization(id, accountId, holdAmount, processedDate, next, amount, processingDate);
     }
 
     /** Residual hold that would be released by a settlement of {@code settledAmount}. */

@@ -3,6 +3,7 @@ package com.ledger.core.service;
 import com.ledger.core.service.application.LedgerEngine;
 import com.ledger.core.service.application.ReplayResult;
 import com.ledger.core.service.application.ReplayResult.Outcome;
+import com.ledger.core.service.application.Scenario;
 import com.ledger.core.service.domain.account.Account;
 import com.ledger.core.service.domain.auth.AuthorizationStatus;
 import com.ledger.core.service.domain.entry.EntryKind;
@@ -12,23 +13,35 @@ import com.ledger.core.service.domain.money.CurrencyCode;
 import com.ledger.core.service.domain.money.Money;
 import org.junit.jupiter.api.Test;
 
+import java.time.LocalDate;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Boundary cases and validation policies, each on a minimal hand-built stream
- * so the expected values follow directly from the inputs.
+ * so the expected values follow directly from the inputs. Dates are built on
+ * the shared {@link Scenario} window (Day n = 2026-01-0n).
  */
 class BoundaryAndValidationTest {
 
     private static final Account AED_ACCOUNT = Account.zeroBalance("A", CurrencyCode.AED);
     private static final Account BHD_ACCOUNT = Account.zeroBalance("B", CurrencyCode.BHD);
 
+    private final AtomicLong position = new AtomicLong(0);
+
+    private EventEnvelope env(String id, int processingDay, int valueDay, LedgerEvent event) {
+        return new EventEnvelope(id, position.incrementAndGet(),
+                Scenario.day(processingDay), Scenario.day(valueDay), event);
+    }
+
     private ReplayResult run(List<Account> accounts, List<EventEnvelope> events) {
-        return new LedgerEngine(accounts, 6).replay(events);
+        return new LedgerEngine(accounts, Scenario.WINDOW_START, Scenario.WINDOW_END,
+                Scenario.BUSINESS_ZONE).replay(events);
     }
 
     @Test
@@ -36,7 +49,7 @@ class BoundaryAndValidationTest {
         ReplayResult result = run(List.of(AED_ACCOUNT), List.of());
         for (int day = 1; day <= 6; day++) {
             assertEquals(Money.zero(CurrencyCode.AED),
-                    LedgerEngine.closingBalance(result.entries(), AED_ACCOUNT, day));
+                    LedgerEngine.closingBalance(result.entries(), AED_ACCOUNT, Scenario.day(day)));
         }
         assertTrue(result.feeTrace().isEmpty());
         assertTrue(result.entries().isEmpty()); // zero total interest -> no capitalization entry
@@ -44,18 +57,16 @@ class BoundaryAndValidationTest {
 
     @Test
     void negativeBalanceEarnsNoInterest() {
-        // -10.00 from day 1; fee assessed day 1 makes it -35.00; both negative.
+        // -10.00 from D1; every date closes negative, so exactly one fee per
+        // date, six in total (fees carry forward: D1 -10, D2 -35, ...).
         ReplayResult result = run(List.of(AED_ACCOUNT), List.of(
-                new EventEnvelope("X1", 1, 1,
-                        new LedgerEvent.Debit("A", Money.of("10.00", CurrencyCode.AED)))));
-        // Every day closes negative, so exactly one fee per day, six in total:
-        // day 1: -10.00 -> fee; day 2: -35.00 -> fee; ... (fees carry forward).
+                env("X1", 1, 1, new LedgerEvent.Debit("A", Money.of("10.00", CurrencyCode.AED)))));
         assertEquals(6, result.feeTrace().size());
         assertEquals(Money.of("10.00", CurrencyCode.AED).negate(),
                 result.feeTrace().getFirst().preFeeBalance());
-        // No duplicate fee for any account-day even though every day is
+        // No duplicate fee for any account-date even though every date is
         // re-examined on subsequent evenings.
-        assertEquals(6, result.feeTrace().stream().map(f -> f.valueDay()).distinct().count());
+        assertEquals(6, result.feeTrace().stream().map(f -> f.valueDate()).distinct().count());
         assertTrue(result.interestTrace().stream().allMatch(a -> a.accrual().isZero()));
         long feeDays = result.entries().stream()
                 .filter(e -> e.kind() == EntryKind.FEE_OVERDRAFT).count();
@@ -67,11 +78,9 @@ class BoundaryAndValidationTest {
         // Ledger 100.00, hold 100.00 -> available after hold == 0.00, and the
         // rule is "at least zero", so the authorization must be APPROVED.
         ReplayResult result = run(List.of(AED_ACCOUNT), List.of(
-                new EventEnvelope("X1", 1, 1,
-                        new LedgerEvent.Credit("A", Money.of("100.00", CurrencyCode.AED))),
-                new EventEnvelope("X2", 2, 2,
-                        new LedgerEvent.AuthorizationRequest("A", "Auth-X",
-                                Money.of("100.00", CurrencyCode.AED)))));
+                env("X1", 1, 1, new LedgerEvent.Credit("A", Money.of("100.00", CurrencyCode.AED))),
+                env("X2", 2, 2, new LedgerEvent.AuthorizationRequest("A", "Auth-X",
+                        Money.of("100.00", CurrencyCode.AED)))));
         assertEquals(AuthorizationStatus.APPROVED, result.authorizations().get("Auth-X").status());
     }
 
@@ -79,19 +88,16 @@ class BoundaryAndValidationTest {
     void oneFilsBelowTheHoldIsDeclined() {
         // Ledger 99.99, hold 100.00 -> available after hold = -0.01 < 0.
         ReplayResult result = run(List.of(AED_ACCOUNT), List.of(
-                new EventEnvelope("X1", 1, 1,
-                        new LedgerEvent.Credit("A", Money.of("99.99", CurrencyCode.AED))),
-                new EventEnvelope("X2", 2, 2,
-                        new LedgerEvent.AuthorizationRequest("A", "Auth-X",
-                                Money.of("100.00", CurrencyCode.AED)))));
+                env("X1", 1, 1, new LedgerEvent.Credit("A", Money.of("99.99", CurrencyCode.AED))),
+                env("X2", 2, 2, new LedgerEvent.AuthorizationRequest("A", "Auth-X",
+                        Money.of("100.00", CurrencyCode.AED)))));
         assertEquals(AuthorizationStatus.DECLINED, result.authorizations().get("Auth-X").status());
     }
 
     @Test
     void crossCurrencyEventIsRejectedNotPosted() {
         ReplayResult result = run(List.of(AED_ACCOUNT), List.of(
-                new EventEnvelope("X1", 1, 1,
-                        new LedgerEvent.Credit("A", Money.of("5.000", CurrencyCode.BHD)))));
+                env("X1", 1, 1, new LedgerEvent.Credit("A", Money.of("5.000", CurrencyCode.BHD)))));
         Outcome outcome = result.outcomeOf("X1");
         assertInstanceOf(Outcome.Rejected.class, outcome);
         assertTrue(((Outcome.Rejected) outcome).reason().contains("CURRENCY_MISMATCH"));
@@ -103,8 +109,7 @@ class BoundaryAndValidationTest {
         // Policy: the overdraft fee is denominated in the account's own
         // currency (no FX table exists). A negative BHD account pays BHD 25.000.
         ReplayResult result = run(List.of(BHD_ACCOUNT), List.of(
-                new EventEnvelope("X1", 1, 1,
-                        new LedgerEvent.Debit("B", Money.of("1.000", CurrencyCode.BHD)))));
+                env("X1", 1, 1, new LedgerEvent.Debit("B", Money.of("1.000", CurrencyCode.BHD)))));
         assertEquals(Money.of("25.000", CurrencyCode.BHD), result.feeTrace().getFirst().feeAmount());
         assertEquals(CurrencyCode.BHD, result.entries().stream()
                 .filter(e -> e.kind() == EntryKind.FEE_OVERDRAFT)
@@ -114,14 +119,11 @@ class BoundaryAndValidationTest {
     @Test
     void excessSettlementIsRejectedAndHoldSurvives() {
         ReplayResult result = run(List.of(AED_ACCOUNT), List.of(
-                new EventEnvelope("X1", 1, 1,
-                        new LedgerEvent.Credit("A", Money.of("500.00", CurrencyCode.AED))),
-                new EventEnvelope("X2", 2, 2,
-                        new LedgerEvent.AuthorizationRequest("A", "Auth-X",
-                                Money.of("100.00", CurrencyCode.AED))),
-                new EventEnvelope("X3", 3, 3,
-                        new LedgerEvent.Settlement("A", "Auth-X",
-                                Money.of("100.01", CurrencyCode.AED)))));
+                env("X1", 1, 1, new LedgerEvent.Credit("A", Money.of("500.00", CurrencyCode.AED))),
+                env("X2", 2, 2, new LedgerEvent.AuthorizationRequest("A", "Auth-X",
+                        Money.of("100.00", CurrencyCode.AED))),
+                env("X3", 3, 3, new LedgerEvent.Settlement("A", "Auth-X",
+                        Money.of("100.01", CurrencyCode.AED)))));
         Outcome outcome = result.outcomeOf("X3");
         assertInstanceOf(Outcome.Rejected.class, outcome);
         assertTrue(((Outcome.Rejected) outcome).reason().contains("SETTLEMENT_EXCEEDS_AUTHORIZED_AMOUNT"));
@@ -134,17 +136,13 @@ class BoundaryAndValidationTest {
     @Test
     void secondSettlementOfSameAuthorizationIsRejected() {
         ReplayResult result = run(List.of(AED_ACCOUNT), List.of(
-                new EventEnvelope("X1", 1, 1,
-                        new LedgerEvent.Credit("A", Money.of("500.00", CurrencyCode.AED))),
-                new EventEnvelope("X2", 2, 2,
-                        new LedgerEvent.AuthorizationRequest("A", "Auth-X",
-                                Money.of("100.00", CurrencyCode.AED))),
-                new EventEnvelope("X3", 3, 3,
-                        new LedgerEvent.Settlement("A", "Auth-X",
-                                Money.of("40.00", CurrencyCode.AED))),
-                new EventEnvelope("X4", 4, 4,
-                        new LedgerEvent.Settlement("A", "Auth-X",
-                                Money.of("40.00", CurrencyCode.AED)))));
+                env("X1", 1, 1, new LedgerEvent.Credit("A", Money.of("500.00", CurrencyCode.AED))),
+                env("X2", 2, 2, new LedgerEvent.AuthorizationRequest("A", "Auth-X",
+                        Money.of("100.00", CurrencyCode.AED))),
+                env("X3", 3, 3, new LedgerEvent.Settlement("A", "Auth-X",
+                        Money.of("40.00", CurrencyCode.AED))),
+                env("X4", 4, 4, new LedgerEvent.Settlement("A", "Auth-X",
+                        Money.of("40.00", CurrencyCode.AED)))));
         assertInstanceOf(Outcome.Accepted.class, result.outcomeOf("X3"));
         Outcome second = result.outcomeOf("X4");
         assertInstanceOf(Outcome.Rejected.class, second);
@@ -161,21 +159,17 @@ class BoundaryAndValidationTest {
         // Credit first so the account never goes negative (keeps fees out of
         // this test's way; fee persistence after reversal is covered elsewhere).
         ReplayResult result = run(List.of(AED_ACCOUNT), List.of(
-                new EventEnvelope("X0", 1, 1,
-                        new LedgerEvent.Credit("A", Money.of("100.00", CurrencyCode.AED))),
-                new EventEnvelope("X1", 1, 1,
-                        new LedgerEvent.Debit("A", Money.of("10.00", CurrencyCode.AED))),
-                new EventEnvelope("X2", 2, 1,
-                        new LedgerEvent.Reversal("A", "X1")),
-                new EventEnvelope("X3", 3, 1,
-                        new LedgerEvent.Reversal("A", "X1"))));
+                env("X0", 1, 1, new LedgerEvent.Credit("A", Money.of("100.00", CurrencyCode.AED))),
+                env("X1", 1, 1, new LedgerEvent.Debit("A", Money.of("10.00", CurrencyCode.AED))),
+                env("X2", 2, 1, new LedgerEvent.Reversal("A", "X1")),
+                env("X3", 3, 1, new LedgerEvent.Reversal("A", "X1"))));
         assertInstanceOf(Outcome.Accepted.class, result.outcomeOf("X2"));
         Outcome duplicate = result.outcomeOf("X3");
         assertInstanceOf(Outcome.Rejected.class, duplicate);
         assertTrue(((Outcome.Rejected) duplicate).reason().contains("DUPLICATE_REVERSAL"));
         // 100 - 10 + 10 = 100.00; the duplicate reversal added nothing.
         assertEquals(Money.of("100.00", CurrencyCode.AED),
-                LedgerEngine.closingBalance(result.entries(), AED_ACCOUNT, 5));
+                LedgerEngine.closingBalance(result.entries(), AED_ACCOUNT, Scenario.day(5)));
         assertEquals(1, result.entries().stream()
                 .filter(e -> e.kind() == EntryKind.REVERSAL_COMPENSATION).count());
         assertTrue(result.feeTrace().isEmpty());
@@ -184,8 +178,7 @@ class BoundaryAndValidationTest {
     @Test
     void reversalOfUnknownTargetIsRejected() {
         ReplayResult result = run(List.of(AED_ACCOUNT), List.of(
-                new EventEnvelope("X1", 1, 1,
-                        new LedgerEvent.Reversal("A", "NOPE"))));
+                env("X1", 1, 1, new LedgerEvent.Reversal("A", "NOPE"))));
         Outcome outcome = result.outcomeOf("X1");
         assertInstanceOf(Outcome.Rejected.class, outcome);
         assertTrue(((Outcome.Rejected) outcome).reason().contains("REVERSAL_TARGET_UNKNOWN"));
@@ -196,12 +189,9 @@ class BoundaryAndValidationTest {
         // A negative Credit would be a backdoor debit; a zero Debit is noise.
         // Direction must come from the event type, never from a smuggled sign.
         ReplayResult result = run(List.of(AED_ACCOUNT), List.of(
-                new EventEnvelope("X1", 1, 1,
-                        new LedgerEvent.Credit("A", Money.of("-50.00", CurrencyCode.AED))),
-                new EventEnvelope("X2", 1, 1,
-                        new LedgerEvent.Debit("A", Money.of("0.00", CurrencyCode.AED))),
-                new EventEnvelope("X3", 1, 1,
-                        new LedgerEvent.Debit("A", Money.of("-5.00", CurrencyCode.AED)))));
+                env("X1", 1, 1, new LedgerEvent.Credit("A", Money.of("-50.00", CurrencyCode.AED))),
+                env("X2", 1, 1, new LedgerEvent.Debit("A", Money.of("0.00", CurrencyCode.AED))),
+                env("X3", 1, 1, new LedgerEvent.Debit("A", Money.of("-5.00", CurrencyCode.AED)))));
         for (String id : List.of("X1", "X2", "X3")) {
             Outcome outcome = result.outcomeOf(id);
             assertInstanceOf(Outcome.Rejected.class, outcome, id);
@@ -209,14 +199,14 @@ class BoundaryAndValidationTest {
         }
         assertTrue(result.entries().isEmpty());
         assertEquals(Money.zero(CurrencyCode.AED),
-                LedgerEngine.closingBalance(result.entries(), AED_ACCOUNT, 6));
+                LedgerEngine.closingBalance(result.entries(), AED_ACCOUNT, Scenario.day(6)));
     }
 
     @Test
     void zeroTotalInstalmentCreditIsRejected() {
         ReplayResult result = run(List.of(BHD_ACCOUNT), List.of(
-                new EventEnvelope("X1", 1, 1,
-                        new LedgerEvent.InstalmentCredit("B", Money.of("0.000", CurrencyCode.BHD), 3))));
+                env("X1", 1, 1, new LedgerEvent.InstalmentCredit("B",
+                        Money.of("0.000", CurrencyCode.BHD), 3))));
         Outcome outcome = result.outcomeOf("X1");
         assertInstanceOf(Outcome.Rejected.class, outcome);
         assertTrue(((Outcome.Rejected) outcome).reason().contains("NON_POSITIVE_INSTALMENT_TOTAL"));
@@ -226,34 +216,110 @@ class BoundaryAndValidationTest {
     @Test
     void unknownAccountIsRejected() {
         ReplayResult result = run(List.of(AED_ACCOUNT), List.of(
-                new EventEnvelope("X1", 1, 1,
-                        new LedgerEvent.Credit("GHOST", Money.of("1.00", CurrencyCode.AED)))));
+                env("X1", 1, 1, new LedgerEvent.Credit("GHOST", Money.of("1.00", CurrencyCode.AED)))));
         assertInstanceOf(Outcome.Rejected.class, result.outcomeOf("X1"));
         assertTrue(result.entries().isEmpty());
     }
 
     @Test
     void lateEventIsReflectedInFeeAssessmentOnlyAfterItIsProcessed() {
-        // Debit valued day 1 processed day 3: days 1-2 are fee-free when
-        // assessed on days 1-2; the day-1 fee appears only at end of day 3,
-        // and the carried-forward negative balance then triggers day-2 and
-        // day-3 fees in the same assessment run.
+        // Debit valued D1 processed D3: D1-D2 are fee-free when assessed on
+        // their evenings; the D1 fee appears only on the evening of D3, and
+        // the carried-forward negative balance then triggers D2 and D3 fees in
+        // the same assessment run.
         ReplayResult result = run(List.of(AED_ACCOUNT), List.of(
-                new EventEnvelope("X1", 1, 1,
-                        new LedgerEvent.Credit("A", Money.of("100.00", CurrencyCode.AED))),
-                new EventEnvelope("X2", 3, 1,
-                        new LedgerEvent.Debit("A", Money.of("300.00", CurrencyCode.AED)))));
-        // All six days end negative, so six fees in total; days 1-3 are
-        // assessed together at end of day 3, days 4-6 on their own evenings.
+                env("X1", 1, 1, new LedgerEvent.Credit("A", Money.of("100.00", CurrencyCode.AED))),
+                env("X2", 3, 1, new LedgerEvent.Debit("A", Money.of("300.00", CurrencyCode.AED)))));
+        // All six dates end negative, so six fees in total; D1-D3 are assessed
+        // together on the evening of D3, D4-D6 on their own evenings.
         assertEquals(6, result.feeTrace().size());
-        assertEquals(3, result.feeTrace().getFirst().assessedOnDay());
-        assertEquals(1, result.feeTrace().getFirst().valueDay());
+        assertEquals(Scenario.day(3), result.feeTrace().getFirst().assessedOnDate());
+        assertEquals(Scenario.day(1), result.feeTrace().getFirst().valueDate());
         assertEquals(Money.of("-200.00", CurrencyCode.AED), result.feeTrace().getFirst().preFeeBalance());
-        // Day 2 pre-fee: -200 - 25 = -225.00; day 3: -250.00.
+        // D2 pre-fee: -200 - 25 = -225.00; D3: -250.00.
         assertEquals(Money.of("-225.00", CurrencyCode.AED), result.feeTrace().get(1).preFeeBalance());
         assertEquals(Money.of("-250.00", CurrencyCode.AED), result.feeTrace().get(2).preFeeBalance());
-        // Days 4-6 are assessed on their own processing days.
-        assertEquals(4, result.feeTrace().get(3).assessedOnDay());
-        assertEquals(6, result.feeTrace().get(5).assessedOnDay());
+        // D4-D6 are assessed on their own processing dates.
+        assertEquals(Scenario.day(4), result.feeTrace().get(3).assessedOnDate());
+        assertEquals(Scenario.day(6), result.feeTrace().get(5).assessedOnDate());
+    }
+
+    @Test
+    void outOfOrderProcessingDateIsAppliedInStreamOrder() {
+        // Mirrors the E9-before-E10 situation: an event whose processing date
+        // is EARLIER than one already seen must still be applied in stream
+        // order, and its effects are picked up by the next evening assessment.
+        // X2 (processing D5, value D5) arrives AFTER X3 (processing D6).
+        ReplayResult result = run(List.of(AED_ACCOUNT, BHD_ACCOUNT), List.of(
+                env("X1", 5, 2, new LedgerEvent.Debit("A", Money.of("10.00", CurrencyCode.AED))),
+                env("X3", 6, 6, new LedgerEvent.Credit("A", Money.of("1.00", CurrencyCode.AED))),
+                env("X2", 5, 5, new LedgerEvent.Credit("B", Money.of("2.000", CurrencyCode.BHD)))));
+        assertInstanceOf(Outcome.Accepted.class, result.outcomeOf("X2"));
+        assertEquals(List.of("X1", "X3", "X2"),
+                result.log().events().stream().map(EventEnvelope::eventId).toList());
+        // A's D2-valued debit makes D2 negative; the fee lands with value date
+        // D2 and is assessed on the evening of D5 (when X1 was processed).
+        // The negativity then carries forward: D3..D6 each earn one fee too
+        // (D2 -10 -> fee; D3 -35 -> fee; D4 -60; D5 -85; D6 -109+1... all < 0),
+        // so 5 fees in total, the first being the back-valued one.
+        assertEquals(5, result.feeTrace().size());
+        assertEquals(Scenario.day(2), result.feeTrace().getFirst().valueDate());
+        assertEquals(Scenario.day(5), result.feeTrace().getFirst().assessedOnDate());
+        // B's back-ordered credit posts fine: closing on D5 includes it.
+        assertEquals(Money.of("2.000", CurrencyCode.BHD),
+                LedgerEngine.closingBalance(result.entries(), BHD_ACCOUNT, Scenario.day(5)));
+    }
+
+    @Test
+    void eventDatesOutsideTheWindowAreRejected() {
+        // A posting valued or processed outside the configured window would be
+        // invisible to fee assessment and interest — a silent inconsistency.
+        // The engine rejects loudly instead (documented in AMBIGUITIES.md).
+        LocalDate before = Scenario.WINDOW_START.minusDays(1);
+        LocalDate after = Scenario.WINDOW_END.plusDays(1);
+        ReplayResult result = run(List.of(AED_ACCOUNT), List.of(
+                new EventEnvelope("X1", 1, before, Scenario.day(1),
+                        new LedgerEvent.Credit("A", Money.of("1.00", CurrencyCode.AED))),
+                new EventEnvelope("X2", 2, Scenario.day(1), after,
+                        new LedgerEvent.Credit("A", Money.of("1.00", CurrencyCode.AED))),
+                new EventEnvelope("X3", 3, after, Scenario.day(1),
+                        new LedgerEvent.Credit("A", Money.of("1.00", CurrencyCode.AED)))));
+        for (String id : List.of("X1", "X2", "X3")) {
+            Outcome outcome = result.outcomeOf(id);
+            assertInstanceOf(Outcome.Rejected.class, outcome, id);
+            assertTrue(((Outcome.Rejected) outcome).reason().contains("EVENT_DATE_OUT_OF_HORIZON"), id);
+        }
+        assertTrue(result.entries().isEmpty());
+    }
+
+    @Test
+    void duplicateEventIdIsRejectedAndKeepsBothOutcomes() {
+        // Idempotent ingestion: the second event with the same id is rejected;
+        // the first occurrence's posting stands; no double-posting.
+        ReplayResult result = run(List.of(AED_ACCOUNT), List.of(
+                env("X1", 1, 1, new LedgerEvent.Credit("A", Money.of("100.00", CurrencyCode.AED))),
+                env("X1", 2, 2, new LedgerEvent.Credit("A", Money.of("100.00", CurrencyCode.AED)))));
+        assertInstanceOf(Outcome.Accepted.class, result.outcomeOf("X1"));
+        // The duplicate's own outcome is retrievable by stream position.
+        Outcome dup = result.outcomeAt(2);
+        assertInstanceOf(Outcome.Rejected.class, dup);
+        assertTrue(((Outcome.Rejected) dup).reason().contains("DUPLICATE_EVENT_ID"));
+        // Only ONE 100.00 posting exists.
+        assertEquals(1, result.entries().stream()
+                .filter(e -> e.kind() == EntryKind.POSTING).count());
+        assertEquals(Money.of("100.00", CurrencyCode.AED),
+                LedgerEngine.closingBalance(result.entries(), AED_ACCOUNT, Scenario.day(5)));
+    }
+
+    @Test
+    void duplicateStreamPositionIsADataContractViolation() {
+        List<EventEnvelope> stream = List.of(
+                new EventEnvelope("X1", 7, Scenario.day(1), Scenario.day(1),
+                        new LedgerEvent.Credit("A", Money.of("1.00", CurrencyCode.AED))),
+                new EventEnvelope("X2", 7, Scenario.day(1), Scenario.day(1),
+                        new LedgerEvent.Credit("A", Money.of("1.00", CurrencyCode.AED))));
+        LedgerEngine engine = new LedgerEngine(List.of(AED_ACCOUNT),
+                Scenario.WINDOW_START, Scenario.WINDOW_END, Scenario.BUSINESS_ZONE);
+        assertThrows(IllegalArgumentException.class, () -> engine.replay(stream));
     }
 }

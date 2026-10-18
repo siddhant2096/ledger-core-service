@@ -14,11 +14,15 @@ import com.ledger.core.service.domain.ledger.EventLog;
 import com.ledger.core.service.domain.money.CurrencyMismatchException;
 import com.ledger.core.service.domain.money.Money;
 
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -26,24 +30,35 @@ import java.util.Set;
  *
  * <p>Processing model:
  * <ol>
- *   <li>Source events are applied strictly in stream order, grouped by
- *       processing day (same-day order = stream order).</li>
+ *   <li>Source events are applied strictly in stream (list) order; the
+ *       envelope's {@code streamPosition} makes that order explicit and unique.
+ *       Events are NEVER reordered by value date. Equal processing dates keep
+ *       stream order; an event whose processing date is earlier than one
+ *       already seen is still applied in stream order and picked up by the
+ *       next evening assessment (documented in AMBIGUITIES.md).</li>
  *   <li>Balances are always derived from ledger entries filtered by
- *       <em>value day</em>, so a late event (e.g. processed day 5, value day 2)
- *       rewrites historical projections without mutating any event.</li>
- *   <li>At the end of every processing day D, overdraft fees are assessed for
- *       every value day v &lt;= D whose pre-fee closing balance is negative and
- *       that has not been assessed before (idempotency key: account + value
- *       day). Fee entries are immutable once derived; later reversals never
- *       remove them.</li>
- *   <li>At the end of the final horizon day, interest is capitalized: each
- *       day's accrual is the post-fee closing balance x {@link #DAILY_RATE},
- *       rounded HALF_UP to the account currency's scale (positive balances
- *       only), and the capitalized credit is exactly the sum of the rounded
- *       daily accruals.</li>
+ *       <em>value date</em>, so a late event (processed 2026-01-05, valued
+ *       2026-01-02) rewrites historical projections without mutating any
+ *       event.</li>
+ *   <li>Evening boundary: whenever the processing date advances (and once at
+ *       the end of the window), overdraft fees are assessed for every value
+ *       date up to the completed date whose pre-fee closing balance is
+ *       negative and that has not been fee-assessed before (idempotency key:
+ *       account + value date). Fee entries are immutable once derived; later
+ *       reversals never remove them.</li>
+ *   <li>Last lifecycle boundary: interest is capitalized at the window end.
+ *       Each day's accrual is the post-fee closing balance x
+ *       {@link #DAILY_RATE}, rounded HALF_UP to the account currency's scale
+ *       (positive balances only); the capitalized credit is exactly the sum of
+ *       the rounded daily accruals.</li>
  * </ol>
  *
- * Replaying the same stream always produces byte-identical entries and reports.
+ * <p>Business dates are {@link LocalDate}s supplied on the envelopes. When
+ * instants must be converted (e.g. real-time ingestion), use
+ * {@link #businessDate(Instant)} — the configured zone, never the JVM default.
+ *
+ * <p>Replaying the same stream always produces byte-identical entries and
+ * reports.
  */
 public final class LedgerEngine {
 
@@ -54,55 +69,77 @@ public final class LedgerEngine {
     public static final String DAILY_RATE = "0.0004";
 
     private final List<Account> accounts;
-    private final int horizonDays;
+    private final LocalDate windowStart;
+    private final LocalDate windowEnd;
+    private final ZoneId businessZone;
 
-    public LedgerEngine(List<Account> accounts, int horizonDays) {
-        // LinkedHashMap semantics via list copy: iteration order = registration
-        // order, which is what keeps the replay output deterministic.
+    /**
+     * @param accounts     iteration order = registration order (keeps output deterministic)
+     * @param windowStart  first business date of the replay window (inclusive)
+     * @param windowEnd    last business date of the replay window (inclusive);
+     *                     interest is capitalized on this date
+     * @param businessZone explicit zone for deriving business dates from instants
+     */
+    public LedgerEngine(List<Account> accounts, LocalDate windowStart, LocalDate windowEnd,
+                        ZoneId businessZone) {
         this.accounts = List.copyOf(accounts);
-        if (horizonDays < 1) {
-            throw new IllegalArgumentException("horizonDays must be >= 1");
+        this.windowStart = Objects.requireNonNull(windowStart, "windowStart");
+        this.windowEnd = Objects.requireNonNull(windowEnd, "windowEnd");
+        this.businessZone = Objects.requireNonNull(businessZone, "businessZone");
+        if (windowEnd.isBefore(windowStart)) {
+            throw new IllegalArgumentException("windowEnd must not be before windowStart");
         }
-        this.horizonDays = horizonDays;
+    }
+
+    /** Derives a business date from an instant using the configured zone. */
+    public LocalDate businessDate(Instant instant) {
+        return BusinessDates.businessDate(instant, businessZone);
     }
 
     public ReplayResult replay(List<EventEnvelope> stream) {
+        // Data-pipeline contract: stream positions must be unique — they key
+        // outcomes and make ordering explicit. Violations are programming
+        // errors, not business rejections.
+        Set<Long> positions = new HashSet<>();
+        for (EventEnvelope envelope : stream) {
+            if (!positions.add(envelope.streamPosition())) {
+                throw new IllegalArgumentException(
+                        "duplicate streamPosition " + envelope.streamPosition());
+            }
+        }
+
         EventLog log = new EventLog();
-        Map<String, Outcome> outcomes = new LinkedHashMap<>();
+        Map<Long, Outcome> outcomes = new LinkedHashMap<>();
         List<LedgerEntry> entries = new ArrayList<>();
         Map<String, Authorization> authorizations = new LinkedHashMap<>();
         List<FeeAssessment> feeTrace = new ArrayList<>();
         List<DailyAccrual> interestTrace = new ArrayList<>();
-        Set<String> assessedFeeDays = new HashSet<>(); // "accountId|valueDay"
+        Set<String> assessedFeeDays = new HashSet<>(); // "accountId|valueDate"
         Set<String> reversedEventIds = new HashSet<>();
+        Set<String> seenEventIds = new HashSet<>();
         long[] sequence = {0};
 
-        // Events are applied strictly in stream order (the specification's
-        // "precise processing order"). Processing days are expected to be
-        // non-decreasing; whenever the processing day advances, the previous
-        // evening's fee assessment runs first (assessment covers ALL value
-        // days up to that day, so skipped empty days need no work). An event
-        // whose processing day is EARLIER than one already seen (E10 follows
-        // E9 in the stream: day 5 after day 6) is still applied in stream
-        // order and is picked up by the next assessment run — documented in
-        // AMBIGUITIES.md.
-        int lastProcessedDay = 0;
+        LocalDate lastProcessedDate = null;
         for (EventEnvelope envelope : stream) {
-            if (envelope.processingDay() > lastProcessedDay) {
-                // Evenings of every day that has fully completed: from the day
-                // we were last on (or day 1) up to the day before the new one.
-                for (int evening = Math.max(1, lastProcessedDay); evening < envelope.processingDay(); evening++) {
+            if (lastProcessedDate == null || envelope.processingDate().isAfter(lastProcessedDate)) {
+                // Evening boundary: every business date that has fully
+                // completed, from the last processed date (or window start) up
+                // to the day before the new processing date.
+                LocalDate first = lastProcessedDate == null ? windowStart : lastProcessedDate;
+                for (LocalDate evening = first; evening.isBefore(envelope.processingDate());
+                     evening = evening.plusDays(1)) {
                     assessFees(evening, entries, feeTrace, assessedFeeDays, sequence);
                 }
-                lastProcessedDay = envelope.processingDay();
+                lastProcessedDate = envelope.processingDate();
             }
             log.append(envelope);
-            outcomes.put(envelope.eventId(), processEvent(
-                    envelope, entries, authorizations, reversedEventIds, sequence));
+            outcomes.put(envelope.streamPosition(), processEvent(
+                    envelope, entries, authorizations, reversedEventIds, seenEventIds, sequence));
         }
-        // Final evening(s): assess everything up to the horizon, then
+        // Final evening(s): assess everything up to the window end, then
         // capitalize interest as the last derived entries of the window.
-        for (int evening = Math.max(1, lastProcessedDay); evening <= horizonDays; evening++) {
+        LocalDate first = lastProcessedDate == null ? windowStart : lastProcessedDate;
+        for (LocalDate evening = first; !evening.isAfter(windowEnd); evening = evening.plusDays(1)) {
             assessFees(evening, entries, feeTrace, assessedFeeDays, sequence);
         }
         capitalizeInterest(entries, interestTrace, sequence);
@@ -118,7 +155,26 @@ public final class LedgerEngine {
                                  List<LedgerEntry> entries,
                                  Map<String, Authorization> authorizations,
                                  Set<String> reversedEventIds,
+                                 Set<String> seenEventIds,
                                  long[] sequence) {
+        // Idempotent ingestion: a replayed/duplicated event id is rejected, the
+        // first occurrence's outcome and entries stand. Documented in
+        // AMBIGUITIES.md.
+        if (!seenEventIds.add(envelope.eventId())) {
+            return new Outcome.Rejected("DUPLICATE_EVENT_ID: " + envelope.eventId()
+                    + " was already processed at another stream position");
+        }
+        if (envelope.processingDate().isBefore(windowStart)
+                || envelope.processingDate().isAfter(windowEnd)
+                || envelope.valueDate().isBefore(windowStart)
+                || envelope.valueDate().isAfter(windowEnd)) {
+            // Outside the configured window the posting would be invisible to
+            // fee assessment and interest, i.e. silently inconsistent — reject
+            // loudly instead. See AMBIGUITIES.md.
+            return new Outcome.Rejected("EVENT_DATE_OUT_OF_HORIZON: " + envelope.eventId()
+                    + " processing=" + envelope.processingDate() + " value=" + envelope.valueDate()
+                    + " outside [" + windowStart + ", " + windowEnd + "]");
+        }
         LedgerEvent event = envelope.event();
         Account account = findAccount(event.accountId());
         if (account == null) {
@@ -154,7 +210,7 @@ public final class LedgerEngine {
         }
         Money signedAmount = credit ? unsignedAmount : unsignedAmount.negate();
         appendEntry(entries, sequence, envelope.eventId(), account.id(), signedAmount,
-                envelope.valueDay(), envelope.processingDay(), EntryKind.POSTING, description);
+                envelope.valueDate(), envelope.processingDate(), EntryKind.POSTING, description);
         return new Outcome.Accepted(description + " posted");
     }
 
@@ -173,7 +229,7 @@ public final class LedgerEngine {
         List<Money> parts = InstalmentAllocator.allocate(e.totalAmount(), e.instalmentCount());
         for (int i = 0; i < parts.size(); i++) {
             appendEntry(entries, sequence, envelope.eventId(), account.id(), parts.get(i),
-                    envelope.valueDay(), envelope.processingDay(), EntryKind.INSTALMENT_POSTING,
+                    envelope.valueDate(), envelope.processingDate(), EntryKind.INSTALMENT_POSTING,
                     "Instalment " + (i + 1) + "/" + parts.size() + " of " + e.totalAmount());
         }
         return new Outcome.Accepted("Instalment credit posted in " + parts.size() + " parts: " + parts);
@@ -194,11 +250,11 @@ public final class LedgerEngine {
             return new Outcome.Rejected("NON_POSITIVE_HOLD: " + e.holdAmount());
         }
         // Authorization decisions use the ledger balance KNOWN AT PROCESSING
-        // TIME: entries derived so far (any source value day up to today, plus
-        // fee entries already derived), i.e. the current books. See
-        // AMBIGUITIES.md — late value-dated events processed earlier today DO
-        // count, because they are already known facts.
-        Money ledgerBalance = closingBalance(entries, account, envelope.processingDay());
+        // TIME: entries derived so far (any source value date up to today,
+        // plus fee entries already derived), i.e. the current books. See
+        // AMBIGUITIES.md — late value-dated events processed earlier DO count,
+        // because they are already known facts.
+        Money ledgerBalance = closingBalance(entries, account, envelope.processingDate());
         Money activeHolds = activeHolds(authorizations, account);
         Money available = ledgerBalance.subtract(activeHolds);
         boolean approved = !available.subtract(e.holdAmount()).isNegative();
@@ -206,7 +262,7 @@ public final class LedgerEngine {
         AuthorizationStatus status = approved ? AuthorizationStatus.APPROVED : AuthorizationStatus.DECLINED;
         authorizations.put(e.authorizationId(),
                 Authorization.decided(e.authorizationId(), account.id(), e.holdAmount(),
-                        envelope.processingDay(), status));
+                        envelope.processingDate(), status));
         String note = "AUTH " + status + ": ledger=" + ledgerBalance
                 + " activeHolds=" + activeHolds + " requested=" + e.holdAmount();
         return new Outcome.Accepted(note);
@@ -248,9 +304,9 @@ public final class LedgerEngine {
                     + e.amount() + " > " + auth.holdAmount());
         }
         appendEntry(entries, sequence, envelope.eventId(), account.id(), e.amount().negate(),
-                envelope.valueDay(), envelope.processingDay(), EntryKind.POSTING,
+                envelope.valueDate(), envelope.processingDate(), EntryKind.POSTING,
                 "Settlement of " + e.authorizationId());
-        authorizations.put(auth.id(), auth.settle(e.amount(), envelope.processingDay()));
+        authorizations.put(auth.id(), auth.settle(e.amount(), envelope.processingDate()));
         return new Outcome.Accepted("Settlement posted; hold released (residual "
                 + auth.holdAmount().subtract(e.amount()) + " released)");
     }
@@ -307,7 +363,7 @@ public final class LedgerEngine {
             compensation = compensation.add(target.amount());
         }
         appendEntry(entries, sequence, envelope.eventId(), account.id(),
-                compensation.negate(), envelope.valueDay(), envelope.processingDay(),
+                compensation.negate(), envelope.valueDate(), envelope.processingDate(),
                 EntryKind.REVERSAL_COMPENSATION,
                 "Reversal of " + e.targetEventId() + " (" + targets.getFirst().description() + ")");
         // 5. State transition last: only a successfully posted reversal marks
@@ -323,40 +379,45 @@ public final class LedgerEngine {
     // ------------------------------------------------------------------
 
     /**
-     * End-of-processing-day fee assessment. For every value day v &lt;= today
-     * that has never been assessed, the pre-fee closing balance (which already
-     * includes all previously derived fee entries) is computed; if negative,
-     * exactly one fee entry is derived with value day v. Because historical
-     * value days are re-examined whenever new events arrive, a late event such
-     * as a day-2-valued debit processed on day 5 correctly creates a day-2 fee
-     * — but never twice (idempotency key account|valueDay), and existing fees
-     * are never removed.
+     * Evening fee assessment for a completed processing date. For every value
+     * date v in the window up to that date that has never been fee-assessed,
+     * the pre-fee closing balance (which already includes all previously
+     * derived fee entries) is computed; if negative, exactly one fee entry is
+     * derived with value date v. Because historical value dates are
+     * re-examined whenever new events arrive, a late back-valued debit
+     * correctly creates a fee for its value date — but never twice
+     * (idempotency key account|valueDate), and existing fees are never
+     * removed.
      */
-    private void assessFees(int processingDay,
+    private void assessFees(LocalDate processingDate,
                             List<LedgerEntry> entries,
                             List<FeeAssessment> feeTrace,
                             Set<String> assessedFeeDays,
                             long[] sequence) {
+        // Clamp at the window end: value dates beyond the window cannot be
+        // posted at all (rejected at ingestion), but a late out-of-window
+        // processing date must not trigger pointless assessment loops.
+        LocalDate effective = processingDate.isAfter(windowEnd) ? windowEnd : processingDate;
         for (Account account : accounts) {
-            for (int v = 1; v <= processingDay; v++) {
+            for (LocalDate v : BusinessDates.datesBetween(windowStart, effective)) {
                 String key = account.id() + "|" + v;
                 if (assessedFeeDays.contains(key)) {
-                    continue; // fee already charged for this account-day: idempotent
+                    continue; // fee already charged for this account-date: idempotent
                 }
                 Money preFeeBalance = closingBalance(entries, account, v);
                 if (preFeeBalance.isNegative()) {
-                    // Mark only when a fee is actually charged: a day that is
+                    // Mark only when a fee is actually charged: a date that is
                     // currently non-negative must be RE-EXAMINED after later
-                    // events arrive (a late day-2-valued debit can make day 2
-                    // negative on processing day 5). Exactly one fee per
-                    // account-day is still guaranteed by the key.
+                    // events arrive (a late back-valued debit can make a past
+                    // date negative). Exactly one fee per account-date is still
+                    // guaranteed by the key.
                     assessedFeeDays.add(key);
                     Money fee = Money.of(OVERDRAFT_FEE_AMOUNT, account.currency()).negate();
-                    String feeId = "FEE-" + account.id() + "-D" + v;
-                    appendEntry(entries, sequence, feeId, account.id(), fee, v, processingDay,
+                    String feeId = "FEE-" + account.id() + "-" + v;
+                    appendEntry(entries, sequence, feeId, account.id(), fee, v, processingDate,
                             EntryKind.FEE_OVERDRAFT,
-                            "Overdraft fee for day " + v + " (balance " + preFeeBalance + ")");
-                    feeTrace.add(new FeeAssessment(account.id(), v, processingDay, preFeeBalance,
+                            "Overdraft fee for " + v + " (balance " + preFeeBalance + ")");
+                    feeTrace.add(new FeeAssessment(account.id(), v, processingDate, preFeeBalance,
                             fee.negate()));
                 }
             }
@@ -376,17 +437,17 @@ public final class LedgerEngine {
                                     long[] sequence) {
         for (Account account : accounts) {
             Money total = Money.zero(account.currency());
-            for (int v = 1; v <= horizonDays; v++) {
+            for (LocalDate v : BusinessDates.datesBetween(windowStart, windowEnd)) {
                 Money base = closingBalance(entries, account, v);
                 Money accrual = base.isPositive() ? base.timesRate(DAILY_RATE) : Money.zero(account.currency());
                 interestTrace.add(new DailyAccrual(account.id(), v, base, accrual));
                 total = total.add(accrual);
             }
             if (total.isPositive()) {
-                appendEntry(entries, sequence, "INTEREST-" + account.id() + "-D" + horizonDays,
-                        account.id(), total, horizonDays, horizonDays,
+                appendEntry(entries, sequence, "INTEREST-" + account.id() + "-" + windowEnd,
+                        account.id(), total, windowEnd, windowEnd,
                         EntryKind.INTEREST_CAPITALIZATION,
-                        "Capitalized interest, days 1-" + horizonDays);
+                        "Capitalized interest, " + windowStart + " to " + windowEnd);
             }
         }
     }
@@ -396,14 +457,14 @@ public final class LedgerEngine {
     // ------------------------------------------------------------------
 
     /**
-     * Closing ledger balance for {@code account} on {@code valueDay}: opening
+     * Closing ledger balance for {@code account} on {@code valueDate}: opening
      * balance plus the sum of all derived entries (postings, fees, reversals,
-     * interest) whose value day is on or before {@code valueDay}.
+     * interest) whose value date is on or before {@code valueDate}.
      */
-    public static Money closingBalance(List<LedgerEntry> entries, Account account, int valueDay) {
+    public static Money closingBalance(List<LedgerEntry> entries, Account account, LocalDate valueDate) {
         Money balance = account.openingBalance();
         for (LedgerEntry entry : entries) {
-            if (entry.accountId().equals(account.id()) && entry.valueDay() <= valueDay) {
+            if (entry.accountId().equals(account.id()) && !entry.valueDate().isAfter(valueDate)) {
                 balance = balance.add(entry.amount());
             }
         }
@@ -441,11 +502,11 @@ public final class LedgerEngine {
     }
 
     private void appendEntry(List<LedgerEntry> entries, long[] sequence, String sourceEventId,
-                             String accountId, Money amount, int valueDay, int derivedOnDay,
-                             EntryKind kind, String description) {
+                             String accountId, Money amount, LocalDate valueDate,
+                             LocalDate derivedOnDate, EntryKind kind, String description) {
         try {
             entries.add(new LedgerEntry(++sequence[0], sourceEventId, accountId, amount,
-                    valueDay, derivedOnDay, kind, description));
+                    valueDate, derivedOnDate, kind, description));
         } catch (CurrencyMismatchException ex) {
             throw new IllegalStateException("internal currency violation", ex);
         }

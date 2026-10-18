@@ -16,6 +16,7 @@ import com.ledger.core.service.domain.money.CurrencyCode;
 import com.ledger.core.service.domain.money.Money;
 import org.junit.jupiter.api.Test;
 
+import java.time.LocalDate;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -29,15 +30,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <p>Expected numbers are DERIVED, not invented; the derivations (also in
  * NUMBERS.md and REJECTED.md):
  *
- * <p>ACC-001 (AED) effective entries: E1 +1200.00@1, E2 -950.00@1,
- * E5 -185.00@4 (Auth-A settlement), E7 -620.00@2 (processed day 5),
- * E9 +620.00@2 (reversal compensation, processed day 6), fees -25.00 valued
- * on days 2/4/5 (assessed at end of processing day 5), interest +0.93@6.
+ * <p>ACC-001 (AED) effective entries: E1 +1200.00@D1, E2 -950.00@D1,
+ * E5 -185.00@D4 (Auth-A settlement), E7 -620.00@D2 (processed D5),
+ * E9 +620.00@D2 (reversal compensation, processed D6), fees -25.00 valued on
+ * D2/D4/D5 (assessed on the evening of D5), interest +0.93@D6. Specification
+ * "Day n" maps to business date 2026-01-0n (see {@link Scenario#day}).
  *
- * <p>Final value-date closings (post-fee, interest only on day 6):
+ * <p>Final value-date closings (post-fee, interest only on D6):
  * D1 250.00, D2 225.00, D3 625.00, D4 415.00, D5 390.00, D6 390.93.
  *
- * <p>ACC-002 (BHD): E10 instalments 3.333 + 3.333 + 3.334 = 10.000@5;
+ * <p>ACC-002 (BHD): E10 instalments 3.333 + 3.333 + 3.334 = 10.000@D5;
  * accruals 0.004 (D5) + 0.004 (D6) = 0.008 capitalized; final 10.008.
  */
 class ReplayTest {
@@ -46,8 +48,12 @@ class ReplayTest {
     private final Account acc001 = Scenario.accounts().get(0);
     private final Account acc002 = Scenario.accounts().get(1);
 
+    private static LocalDate day(int n) {
+        return Scenario.day(n);
+    }
+
     private Money closing(Account account, int day) {
-        return LedgerEngine.closingBalance(result.entries(), account, day);
+        return LedgerEngine.closingBalance(result.entries(), account, day(day));
     }
 
     private Money aed(String amount) {
@@ -70,6 +76,9 @@ class ReplayTest {
     void allTenEventsAreInTheLogInStreamOrder() {
         assertEquals(List.of("E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8", "E9", "E10"),
                 result.log().events().stream().map(EventEnvelope::eventId).toList());
+        // Stream positions are explicit, unique, and match specification order.
+        assertEquals(List.of(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L),
+                result.log().events().stream().map(EventEnvelope::streamPosition).toList());
     }
 
     @Test
@@ -99,15 +108,15 @@ class ReplayTest {
 
     @Test
     void e7RewritesDay2HistoryWithoutTouchingTheStream() {
-        // Without E7/E9 the day-2 closing would be 250.00. The replayed day-2
-        // closing is 225.00 because E7 (-620@2) and E9 (+620@2) and the day-2
-        // fee (-25@2) are all part of the complete stream. E7 itself remains,
-        // unmutated, with processing day 5 and value day 2.
+        // Without E7/E9 the D2 closing would be 250.00. The replayed D2 closing
+        // is 225.00 because E7 (-620@D2) and E9 (+620@D2) and the D2 fee
+        // (-25@D2) are all part of the complete stream. E7 itself remains,
+        // unmutated, with processing date D5 and value date D2.
         LedgerEntry e7Entry = result.entries().stream()
                 .filter(e -> e.sourceEventId().equals("E7")).findFirst().orElseThrow();
         assertEquals(aed("-620.00"), e7Entry.amount());
-        assertEquals(2, e7Entry.valueDay());
-        assertEquals(5, e7Entry.derivedOnDay());
+        assertEquals(day(2), e7Entry.valueDate());
+        assertEquals(day(5), e7Entry.derivedOnDate());
     }
 
     @Test
@@ -116,8 +125,8 @@ class ReplayTest {
                 .filter(e -> e.sourceEventId().equals("E9")).findFirst().orElseThrow();
         assertEquals(aed("620.00"), compensation.amount());
         assertEquals(EntryKind.REVERSAL_COMPENSATION, compensation.kind());
-        assertEquals(2, compensation.valueDay());   // lands on E7's value date
-        assertEquals(6, compensation.derivedOnDay());
+        assertEquals(day(2), compensation.valueDate());   // lands on E7's value date
+        assertEquals(day(6), compensation.derivedOnDate());
         // Originals intact: E7's debit and E9's compensation both exist.
         assertEquals(1, result.entries().stream().filter(e -> e.sourceEventId().equals("E7")).count());
         assertEquals(1, result.entries().stream().filter(e -> e.sourceEventId().equals("E9")).count());
@@ -131,7 +140,7 @@ class ReplayTest {
         // No ledger entry, no authorization state created.
         assertEquals(0, result.entries().stream().filter(e -> e.sourceEventId().equals("E6")).count());
         assertEquals(null, result.authorizations().get("Auth-Z"));
-        // Funds did not leave the account: day-4 closing reflects only the
+        // Funds did not leave the account: D4 closing reflects only the
         // Auth-A settlement (625 - 185 - 25 fee = 415.00).
         assertEquals(aed("415.00"), closing(acc001, 4));
     }
@@ -142,19 +151,19 @@ class ReplayTest {
         assertEquals(AuthorizationStatus.PARTIALLY_SETTLED, authA.status());
         assertEquals(aed("185.00"), authA.settledAmount());
         assertEquals(aed("200.00"), authA.holdAmount());
-        assertEquals(4, authA.settledOnDay());
-        // Settlement posted -185.00 with value day 4.
+        assertEquals(day(4), authA.settledOnDate());
+        // Settlement posted -185.00 with value date D4.
         LedgerEntry settlement = result.entries().stream()
                 .filter(e -> e.sourceEventId().equals("E5")).findFirst().orElseThrow();
         assertEquals(aed("-185.00"), settlement.amount());
-        assertEquals(4, settlement.valueDay());
+        assertEquals(day(4), settlement.valueDate());
         // Hold fully released at settlement: no active holds remain.
         assertEquals(aed("0.00"), LedgerEngine.activeHolds(result.authorizations(), acc001));
     }
 
     @Test
     void authBIsDeclinedBecauseTheAccountWasOverdrawnAtProcessingTime() {
-        // When E8 is processed (day 5, after E7), the known ledger balance is
+        // When E8 is processed (D5, after E7), the known ledger balance is
         // 1200 - 950 + 400 - 185 - 620 = -155.00; -155.00 - 90.00 < 0, so the
         // hold must be declined. It creates no active hold and no ledger entry.
         Authorization authB = result.authorizations().get("Auth-B");
@@ -167,31 +176,33 @@ class ReplayTest {
     void exactlyOneFeePerNegativeAccountDayWithAssessedDayValueDate() {
         List<FeeAssessment> fees = result.feeTrace();
         assertEquals(3, fees.size());
-        // All three fees were derived at end of processing day 5, when E7 made
-        // days 2, 4 and 5 negative. Day 3 stayed positive: -370 -25 +400 = 5.00.
-        assertEquals(2, fees.get(0).valueDay());
+        // All three fees were derived on the evening of D5, when E7 made
+        // D2, D4 and D5 negative. D3 stayed positive: -370 -25 +400 = 5.00.
+        assertEquals(day(2), fees.get(0).valueDate());
         assertEquals(aed("-370.00"), fees.get(0).preFeeBalance());
-        assertEquals(4, fees.get(1).valueDay());
+        assertEquals(day(4), fees.get(1).valueDate());
         assertEquals(aed("-180.00"), fees.get(1).preFeeBalance()); // 5 - 185
-        assertEquals(5, fees.get(2).valueDay());
+        assertEquals(day(5), fees.get(2).valueDate());
         assertEquals(aed("-205.00"), fees.get(2).preFeeBalance()); // -180 - 25
         for (FeeAssessment fee : fees) {
-            assertEquals(5, fee.assessedOnDay());
+            assertEquals(day(5), fee.assessedOnDate());
             assertEquals(aed("25.00"), fee.feeAmount());
         }
-        // Fee entries carry value date == assessed day (the day that was negative).
+        // Fee entries carry value date == assessed date (the date that was negative).
         List<LedgerEntry> feeEntries = result.entries().stream()
                 .filter(e -> e.kind() == EntryKind.FEE_OVERDRAFT).toList();
         assertEquals(3, feeEntries.size());
-        assertEquals(List.of(2, 4, 5), feeEntries.stream().map(LedgerEntry::valueDay).toList());
-        assertEquals(List.of(5, 5, 5), feeEntries.stream().map(LedgerEntry::derivedOnDay).toList());
+        assertEquals(List.of(day(2), day(4), day(5)),
+                feeEntries.stream().map(LedgerEntry::valueDate).toList());
+        assertEquals(List.of(day(5), day(5), day(5)),
+                feeEntries.stream().map(LedgerEntry::derivedOnDate).toList());
     }
 
     @Test
     void e9DoesNotRemoveAssessedFees() {
         // Chosen policy: fee entries are immutable once derived. E9 restores
-        // the pre-fee day-2 balance to +250.00, yet the day-2 fee stays, so
-        // the final day-2 closing is 225.00, NOT the pre-E7 250.00.
+        // the pre-fee D2 balance to +250.00, yet the D2 fee stays, so the
+        // final D2 closing is 225.00, NOT the pre-E7 250.00.
         assertEquals(aed("225.00"), closing(acc001, 2));
         assertEquals(3, result.feeTrace().size());
     }
@@ -208,7 +219,9 @@ class ReplayTest {
         assertEquals(aed("0.17"), accruals.get(3).accrual());
         assertEquals(aed("0.16"), accruals.get(4).accrual());
         assertEquals(aed("0.16"), accruals.get(5).accrual());
-        // ACC-002: zero balance accrues nothing on days 1-4.
+        assertEquals(day(1), accruals.get(0).date());
+        assertEquals(day(6), accruals.get(5).date());
+        // ACC-002: zero balance accrues nothing on D1-D4.
         List<DailyAccrual> bhdAccruals = result.interestTrace().stream()
                 .filter(a -> a.accountId().equals("ACC-002")).toList();
         for (int i = 0; i < 4; i++) {
@@ -228,7 +241,7 @@ class ReplayTest {
                 .filter(e -> e.kind() == EntryKind.INTEREST_CAPITALIZATION
                         && e.accountId().equals("ACC-001")).findFirst().orElseThrow();
         assertEquals(aed("0.93"), interest001.amount());
-        assertEquals(6, interest001.valueDay());
+        assertEquals(day(6), interest001.valueDate());
 
         LedgerEntry interest002 = result.entries().stream()
                 .filter(e -> e.kind() == EntryKind.INTEREST_CAPITALIZATION
@@ -260,9 +273,9 @@ class ReplayTest {
         Money total = instalments.stream().map(LedgerEntry::amount)
                 .reduce(Money.zero(CurrencyCode.BHD), Money::add);
         assertEquals(bhd("10.000"), total);
-        // All three instalments carry the same value day (5), the documented
+        // All three instalments carry the same value date (D5), the documented
         // assumption for E10's missing value date.
-        assertTrue(instalments.stream().allMatch(e -> e.valueDay() == 5));
+        assertTrue(instalments.stream().allMatch(e -> e.valueDate().equals(day(5))));
     }
 
     @Test
@@ -272,6 +285,7 @@ class ReplayTest {
         assertEquals(result.feeTrace(), again.feeTrace());
         assertEquals(result.interestTrace(), again.interestTrace());
         assertEquals(result.authorizations(), again.authorizations());
+        assertEquals(result.outcomes(), again.outcomes());
     }
 
     @Test
