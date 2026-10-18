@@ -77,3 +77,24 @@ Cross-checked engine output by hand (value-date order, ACC-001):
 - Interest: 250x0.0004=0.1000->0.10; 225->0.09; 625->0.25; 415->0.1660->0.17; 390->0.1560->0.16; 390->0.16. Sum 0.93 -> final 390.93.
 - ACC-002: 3.333+3.333+3.334=10.000 exactly; 10.000x0.0004=0.004000->0.004 (D5, D6); capitalized 0.008 -> final 10.008.
 - All match the engine report. No discrepancies.
+
+## 2026-10-18 15:35 IST — Engine fix committed
+
+- Committed stream-order processing + full test suite as `a497608`.
+
+## 2026-10-18 15:50 IST — Documentation written
+
+- Rewrote README.md (purpose, prerequisites, commands incl. the isolated
+  intentional-failure command, actual replay output with sections explained, key
+  assumptions, layout).
+- Wrote ARCHITECTURE.md (domain objects, event/entry split, replay model, auth state
+  machine, settlement atomicity, reversal semantics, fee idempotency, interest
+  rounding, currency safety, invariants mapped to tests, six real alternatives with
+  trade-offs, production gaps).
+- Wrote AMBIGUITIES.md — 21 ambiguities, each with policy/rationale/alternative/
+  consequence/enforcing test.
+- Wrote REJECTED.md — verdicts: 1 ACCEPTED, 2 REJECTED, 3 ACCEPTED, 4 ACCEPTED,
+  5 ACCEPTED WITH QUALIFICATION, 6 REJECTED, 7 REJECTED, 8 REJECTED, each with
+  arithmetic and stated assumptions; plus the six actually-abandoned approaches.
+- Wrote NUMBERS.md — all constants with source (requirement vs choice) and
+  halving analysis.
