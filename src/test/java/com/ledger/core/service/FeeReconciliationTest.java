@@ -161,11 +161,18 @@ class FeeReconciliationTest {
     // Before X3: D1 = -10 -> F1 charged (D1 evening); D2 = -10 -25 +10 =
     // -25 -> F2 charged (D2 evening, preFee -25.00).
     // After X3 (D1 non-fee = +5.00): F1 unjustified -> compensated.
-    // F2's eligibility MUST be re-evaluated WITHOUT F1's about-to-be-
-    // compensated fee: correct base = 5 + 10 = +15.00 -> F2 compensated.
-    // An implementation leaking F1 into D2's base would compute
-    // 5 - 25 + 10 = -10.00 and wrongly RETAIN F2. This test fails on such
-    // an implementation.
+    // F2's eligibility is re-evaluated WITHOUT F1's compensated fee:
+    // base = 5 + 10 = +15.00 -> F2 compensated.
+    //
+    //   Accuracy note (recorded after the phase-12 mutation experiment):
+    //   this test pins the documented cascade BEHAVIOR. The comment's
+    //   original leak mechanism ("compute -10.00 and retain F2") was
+    //   imprecise: pass 1 only lets NEGATIVE dates participate, and a date
+    //   about to be compensated is non-negative in the current pass, so the
+    //   described leak cannot occur in this loop shape. The genuine
+    //   discrimination of the participation guard is exercised by
+    //   compensatedDateIsNeverRechargedButNewNegativeDatesAreCharged (it
+    //   failed on the willCarryFee-removal mutation with -140.00 vs -65.00).
     // ---------------------------------------------------------------
     @Test
     void compensationOfEarlierFeeChangesLaterDatesEligibility() {
@@ -208,10 +215,19 @@ class FeeReconciliationTest {
     //   F2's ONLY justification is F1's fee.
     // X3 REVERSAL of X1 (proc D3, value D1) -> +10.00 compensation @D1.
     //   D3 evening: D1 = 0.00 -> F1 compensated.
-    //   D2 MUST then be evaluated WITHOUT F1: correct base = 0 + 10 =
-    //   +10.00 -> F2 compensated. An implementation leaking the
-    //   about-to-be-compensated F1 would compute 0 - 25 + 10 = -15.00 and
-    //   wrongly RETAIN F2 — this test fails on such an implementation.
+    //   D2 is then evaluated WITHOUT F1: base = 0 + 10 = +10.00 -> F2
+    //   compensated.
+    //
+    //   Accuracy note (recorded after a mutation experiment in the worklog):
+    //   this test pins the documented cascade BEHAVIOR (reversal-triggered
+    //   compensation flowing into a dependent fee), but it does NOT
+    //   discriminate the participation mechanism: because a date about to be
+    //   compensated is by definition non-negative in the current pass, and
+    //   only negative dates participate, every variant of this loop shape
+    //   excludes such fees here. The test that genuinely discriminates the
+    //   participation guard is compensatedDateIsNeverRechargedButNewNegative-
+    //   DatesAreCharged (proven by the leak-variant experiment: it failed
+    //   there with D3 = -140.00 instead of -65.00).
     //
     // Independent calculation (no effective fees remain): D1 = -10 +10 =
     // 0.00; D2 = 0 + 10 = 10.00; D3..D6 = 10.00. Interest: 10 x 0.0004 =

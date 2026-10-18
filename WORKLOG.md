@@ -810,3 +810,45 @@ Inspected `LedgerEngine.replay`/`reconcileFees` against the four reported issues
 - README test count 101 -> 105.
 - No production-code changes this phase: the audit found no reproducible defect
   beyond those already fixed in phases 9-10.
+
+---
+
+# Phase 12 — fifth reconcileFees audit with mutation experiment
+
+## 2026-10-18 21:03 IST — Audit and new reversal-cascade test
+
+- Re-read reconcileFees from disk (unchanged since phase 9 fix). Formal invariant
+  verified by construction: after each boundary, effective(v) iff
+  sequentialBase(v) < 0 AND v is lifecycle-eligible (not charged-and-compensated),
+  because pass 1 participates exactly the fees that will be effective after the
+  boundary. Deterministic single ascending pass; no iteration.
+- Added `reversalCompensationCascadesToDependentFeeEligibility`: the sharpest
+  requested cascade — X1 -10@D1 -> F1; X2 +10@D2 -> F2 exists ONLY because of F1
+  (preFee -25.00); X3 = reversal of X1 -> F1 compensated on the D3 evening and F2
+  compensated with it; finals D1 0.00, D2..D6 10.00, no interest (0.0040 rounds
+  to 0.00 at AED scale). Passed first run on the current engine (committed
+  06a8bf9).
+
+## 2026-10-18 21:15 IST — Mutation experiment (honest negative result)
+
+- To verify the new test's discriminating power, patched a scratch worktree
+  (removed the willCarryFee guard so desired dates ALWAYS participate) and ran
+  FeeReconciliationTest there.
+- Result: the new reversal-cascade test PASSED even on the mutant — and the
+  phase-10 cascade test would too. Root cause of my earlier overclaim: pass 1 only
+  lets dates that are negative IN THE CURRENT PASS participate, and a date about
+  to be compensated is by definition non-negative in that pass, so the feared leak
+  ("later dates computed with a fee about to be compensated") is structurally
+  impossible in this loop shape. The mutant DID fail
+  compensatedDateIsNeverRechargedButNewNegativeDatesAreCharged with exactly the
+  expected signature (D3 = -140.00 phantom-cascade vs correct -65.00) — that test
+  is the genuine discriminator of the participation guard.
+- Corrected the overclaiming comments in BOTH cascade tests to say precisely what
+  each pins and which test discriminates the guard. (My phase-10 comment had
+  described a leak mechanism that cannot occur; recorded here rather than
+  silently edited away.)
+- Worktree removed. No production code changed in this phase.
+
+## 2026-10-18 21:20 IST — Final verification
+
+- Pending: full suite, replay, commit of comment corrections.
