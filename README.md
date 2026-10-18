@@ -17,7 +17,7 @@ The event stream is replayable from scratch and every replay is byte-identical.
 ## Commands
 
 ```bash
-# Run the normal test suite (79 tests; the deliberately failing test is excluded)
+# Run the normal test suite (85 tests; the deliberately failing test is excluded)
 mvn test
 
 # Replay the full event stream and print the six-day report
@@ -273,7 +273,8 @@ src/main/java/com/ledger/core/service/
 src/test/java/com/ledger/core/service/
 ├── MoneyTest, InstalmentAllocatorTest, ReplayTest, ReversalTest,
 ├── BoundaryAndValidationTest, ReportTest, BusinessDatesTest,
-├── EventStreamTest (per-event E1..E10), DailyProjectionTest (all six days)
+├── EventStreamTest (per-event E1..E10), DailyProjectionTest (all six days),
+├── LateEventFeeTest (late back-valued events vs assessed/unassessed fee days)
 └── IntentionalFailureTest  (@Tag("intentional-failure"), excluded by default)
 ```
 

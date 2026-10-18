@@ -424,3 +424,66 @@ WORKLOG); (D) final verification and focused commits.
 - Terminology cross-check: AMBIGUITIES.md #1 defines "pre-fee" exactly as the
   sequential before-own-fee meaning used in REJECTED.md; NUMBERS.md contains no
   conflicting series.
+
+---
+
+# Phase 6 — AMBIGUITIES.md revision + late-event regression test
+
+## 2026-10-18 19:11 IST — Inspection
+
+- Repo clean at `03dfd1e`. Re-read AMBIGUITIES.md sections 1, 2, 6, 9, 10, 11, 12,
+  20; inspected `Authorization`/`AuthorizationStatus` (PARTIALLY_SETTLED is terminal:
+  `settle()` throws when not settleable — code already matches the docs), the
+  fee-assessment loop in `LedgerEngine.replay`/`assessFees`, and the interest
+  capitalization code.
+
+## 2026-10-18 19:30 IST — New regression test (point 3 of the review)
+
+- Added `LateEventFeeTest` (6 tests) with a synthetic AED stream: D1 overdraft
+  (-20.00) -> fee assessed on D1 evening; a LATE credit (proc D4, value D1) makes
+  D1's final reconstruction positive (+55.00) while the D1 fee remains; a LATE debit
+  (proc D5, value D3) makes the previously-examined-but-uncharged D3 negative ->
+  fee valued D3, derived D5, exactly once. Passed on first run: 6/6 — the
+  implementation behaved exactly as derived (fee trace [(D1,discovered D1,-20.00),
+  (D3,discovered D5,-45.00)], finals 55.00/255.00/-70.00/230.00/230.00/230.39).
+
+## 2026-10-18 19:35 IST — Targeted AMBIGUITIES.md edits
+
+- Added a "How to read" legend distinguishing requirement / accounting invariant /
+  business-policy choice / implementation choice (review point 7).
+- #1: appended the complete fee lifecycle (sequential basis, boundary timing,
+  late-event discovery, reconsideration rule, immutability, valueDate vs
+  derivedOnDate) plus the explicit statement that the final projection is NOT a
+  claim every historical fee would fire under full prior knowledge.
+- #2: cross-referenced #1's sequential basis; alternative reworded as "not chosen
+  because it contradicts the spec's balance definition" (requirement-grounded).
+- #6: PARTIALLY_SETTLED terminality made literal (verified against code); 185/200/15
+  figures re-verified.
+- #9: added the explicit reversal processing-date vs value-date vs fee-history
+  breakdown for E9, cross-referencing #10/#11.
+- #10: added the "fee remains though final reconstructed balance is positive"
+  explanation; recompute alternative reframed as a defensible trade-off, not an
+  error; added LateEventFeeTest reference.
+- #11: noted assessments run only at defined boundaries; cross-ref to #20; added
+  LateEventFeeTest reference.
+- #12: bases re-verified (250/225/625/415/390/390, accruals sum 0.93, single
+  capitalization at window end); added "final historical projection, not the
+  balance known on each processing day"; terminology matches README/REJECTED.
+- #20: rewritten — four distinct concepts (stream order, processing date, value
+  date, assessment boundaries) and the ACTUAL implemented trigger behavior for
+  backwards-moving processing dates (no boundary fires for E10; the window-end
+  evening scans the full window prefix for uncharged dates; idempotency via the
+  account|valueDate key). Removed the vague "correct because value-date based"
+  claim.
+
+## 2026-10-18 19:40 IST — Validation
+
+- `mvn clean test`: 85 tests, 0 failures — BUILD SUCCESS (includes the 6 new
+  LateEventFeeTest tests).
+- `mvn -q compile exec:java`: figures unchanged (390.93 / 10.008 / fees 3x25.00
+  discovered 2026-01-05 / interest 0.93 / 0.008; Auth-A PARTIALLY_SETTLED, Auth-B
+  DECLINED).
+- Docs cross-check: AMBIGUITIES "final projection / point-in-time" wording matches
+  README report header and REJECTED reference series; no contradictions found.
+- No application-code changes in this phase (inspection found no defect); the only
+  code-side change is the added test file.

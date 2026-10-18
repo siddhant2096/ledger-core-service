@@ -5,15 +5,34 @@ least one plausible alternative, the consequence, and the test that enforces the
 choice. None of these policies is presented as mandated by the requirements; each is
 a documented, defensible decision.
 
+**How to read this document** — four kinds of statements appear and are labelled as
+such:
+
+1. **Requirement** — explicit in the assignment (e.g. "fee: AED 25.00", "do not
+   discard a rounding remainder", "never mutate or delete an original event").
+2. **Accounting invariant** — not negotiable regardless of policy (conservation of
+   minor units; no silent creation/destruction of money; exact decimal arithmetic).
+3. **Business-policy choice** — the spec permits multiple defensible policies; we
+   picked one and show the trade-off (e.g. immutable assessed fees, residual-hold
+   release, fee schedule per currency). Alternatives here are *not* "wrong"; they
+   are different defensible policies with different consequences.
+4. **Implementation choice** — arbitrary but must be deterministic and documented
+   (e.g. residual minor units go to the LAST instalment; window dates
+   2026-01-01..06).
+
+Where an alternative would violate an explicit requirement or an accounting
+invariant (e.g. rounding 3 × BHD 3.334 = 10.002, discarding an interest remainder),
+the text says so plainly instead of calling it a policy difference.
+
 ---
 
 ## 1. Does fee assessment use the pre-fee or post-fee closing balance?
 
 1. **Ambiguity**: "that day's closing ledger balance is negative" — closing balance
    computed before or after that day's own fee?
-2. **Chosen policy**: pre-fee. A day's own fee cannot participate in the balance that
-   triggers it (that would be circular). Previously assessed fees from *earlier* value
-   days DO participate.
+2. **Chosen policy** (business-policy choice): pre-fee. A day's own fee cannot
+   participate in the balance that triggers it (that would be circular). Previously
+   assessed fees from *earlier* value dates DO participate.
 3. **Why**: the circular version has no fixed point (a −10 balance + 25 fee is still
    negative, so charge again?). Pre-fee is the standard overdraft-assessment semantic:
    the fee is a consequence of the day's activity, not a cause of itself.
@@ -23,16 +42,51 @@ a documented, defensible decision.
    account-day.
 6. **Test**: `ReplayTest.exactlyOneFeePerNegativeAccountDayWithAssessedDayValueDate`.
 
+**The complete fee lifecycle, precisely** (consistent with #2, #10, #11, #20 and with
+the "sequential fee-assessment balances" terminology in REJECTED.md):
+
+- **Basis**: each value date v is assessed on the balance *immediately before v's own
+  fee* — which INCLUDES fees already posted for earlier value dates, because
+  assessment walks value dates in ascending order. Example from the scenario: D4's
+  assessment balance is −180.00 = −370.00(D2) − 25.00(D2 fee, assessed moments
+  earlier) + 400.00 − 185.00.
+- **Timing**: assessment runs only at defined processing-time boundaries — the
+  evening of each completed processing date, and once at the window end (see #20 for
+  the exact trigger logic).
+- **Late events**: a late event (processing date later than its value date) can
+  reveal an overdraft on a historical value date; that date is then assessed at the
+  next boundary, and the resulting fee carries `valueDate` = the overdrawn
+  historical date and `derivedOnDate` = the processing date on which it was actually
+  discovered and posted. These two dates are always distinct fields; the report
+  prints both.
+- **Reconsideration**: an account-date not previously *charged* may be re-examined
+  at every later boundary; an account-date already charged is never charged twice
+  (idempotency key account|valueDate).
+- **Immutability**: an assessed fee is never removed or recomputed. A later
+  back-valued reversal may make the fee's value date positive in the final
+  projection — the fee REMAINS, because it was triggered by the books as known at
+  assessment time, not by the final reconstructed balance (see #10). The final
+  projection is therefore NOT a claim that every historical fee would still fire if
+  the complete stream had been known beforehand: under hypothetical full prior
+  knowledge (E7 and E9 both known), no date is ever negative pre-fee and no fee
+  would have been triggered at all. The report separates the two views
+  deliberately: per-date balances are end-of-window projections; the FEE ASSESSMENT
+  TRACE shows what was knowable when each fee was actually derived.
+
 ## 2. Can a fee itself trigger another fee?
 
 1. **Ambiguity**: if a fee pushes an account deeper into the negative, does it cascade?
 2. **Chosen policy**: within one day, no (the idempotency key allows one fee per
    account-day). Across days, yes: a still-negative balance the next day — even if
-   negativity is partly caused by earlier fees — earns that day its own fee.
+   negativity is partly caused by earlier fees — earns that day its own fee. This is
+   the "sequential fee-assessment" basis of #1: earlier fees participate in later
+   dates' balances.
 3. **Why**: matches "once per account per day"; the cross-day effect is not a cascade
    but a new assessment of a new day.
-4. **Alternative**: never let fees contribute to fee bases (fee-exempt balances).
-   Rejected: the spec says closing balance includes "previously generated fee entries".
+4. **Alternative**: never let fees contribute to fee bases (fee-exempt balances). Not
+   chosen because it contradicts the spec's definition of the ledger balance, which
+   explicitly includes "previously generated fee entries" (a requirement, not a
+   policy option).
 5. **Consequence**: a persistent −10 overdraft costs 25/day, and fees compound the
    debt day over day (BoundaryAndValidationTest shows −10.00 becoming 6 × 25.00 of
    fees over six days).
@@ -87,18 +141,28 @@ a documented, defensible decision.
 ## 6. Does a settlement consume the hold, release the entire hold, or keep a residual?
 
 1. **Ambiguity**: settling 185.00 against a 200.00 hold — what happens to the 15.00?
-2. **Chosen policy**: the settlement posts −185.00 and releases the **entire** hold;
-   the residual 15.00 is released and the authorization becomes terminal
-   (PARTIALLY_SETTLED).
+2. **Chosen policy** (business-policy choice): the settlement posts −185.00 and
+   releases the **entire** hold; the residual 15.00 is released and the authorization
+   becomes **terminal** in status `PARTIALLY_SETTLED`. "Terminal" is literal in the
+   implementation: `AuthorizationStatus.isSettleable()` is true only for APPROVED, and
+   `Authorization.settle()` throws on any non-settleable state, so PARTIALLY_SETTLED
+   means exactly "captured below the authorized amount; remaining hold released; no
+   further captures allowed". Verified against `Authorization`/
+   `AuthorizationStatus` (no enum or lifecycle change was needed — the code already
+   implements this).
 3. **Why**: matches the common card-acquiring model (one capture per authorization;
    remaining hold drops off). It makes double consumption structurally impossible and
    keeps the state machine tiny.
 4. **Alternative**: multi-capture — residual stays active for further settlements up
-   to the hold total. More flexible (partial shipments), but requires tracking
-   remaining-capturable amounts and is unnecessary for this window.
-5. **Consequence**: a second settlement against Auth-A would be REJECTED
-   (`AUTHORIZATION_NOT_SETTLEABLE`); available balance rises by the released residual.
-6. **Test**: `BoundaryAndValidationTest.secondSettlementOfSameAuthorizationIsRejected`.
+   to the hold total. A defensible policy (supports partial shipments), not an error;
+   it requires tracking remaining-capturable amounts and is unnecessary for this
+   window, so it was not chosen.
+5. **Consequence**: settling 185.00 against the 200.00 Auth-A hold posts exactly
+   −185.00 (no more, no less), releases the residual 15.00, leaves zero active hold,
+   and a second settlement against Auth-A would be REJECTED
+   (`AUTHORIZATION_NOT_SETTLEABLE`).
+6. **Test**: `BoundaryAndValidationTest.secondSettlementOfSameAuthorizationIsRejected`,
+   `EventStreamTest.e5SettlesAuthAFor185AndReleasesResidualHold`.
 
 ## 7. Can a settlement exceed the authorized amount?
 
@@ -133,33 +197,57 @@ a documented, defensible decision.
 2. **Chosen policy**: exact accounting compensation — a new immutable
    `REVERSAL_COMPENSATION` entry with the negated sum of the target's postings, value
    date taken from the reversal event (Day 2 for E9). The original stays, untouched.
-3. **Why**: the spec forbids deletion; compensation preserves the complete audit trail
-   and makes "what happened and when" reconstructable.
+3. **Why**: the spec forbids deletion (a requirement); compensation preserves the
+   complete audit trail and makes "what happened and when" reconstructable.
 4. **Alternative**: mark-and-suppress (original kept but excluded from projections).
-   Rejected: projections then depend on a mutable flag; compensation is pure
+   Not chosen: projections would then depend on a mutable flag, and the flag would
+   have to be maintained consistently with the append-only rule; compensation is pure
    double-entry bookkeeping.
 5. **Consequence**: Day-2 pre-fee balance returns to exactly +250.00 after E9; both
    E7's −620.00 and E9's +620.00 are visible in the entry list.
 6. **Test**: `ReplayTest.e9CompensatesE7ExactlyWithoutDeletingIt`.
 
+**The two dates of a reversal, explicitly** (E9 as the example):
+
+- **Reversal processing date (Day 6)**: when the reversal event is received,
+  validated (target exists, eligible kind, same account, not already reversed), and
+  posted. Authorization-style "what was known" questions use this date.
+- **Reversal value date (Day 2)**: the accounting date the compensating entry
+  applies to. Because E9's compensation is valued Day 2, the Day-2 historical
+  projection changes (pre-fee 250.00 restored) without rewriting anything.
+- **Fee-assessment history**: untouched. Fees already assessed remain assessed
+  under the immutable-fee policy — see #10 (reversal vs fees) and #11 (when
+  assessments run); the reversal changes balances, not the assessment history.
+
 ## 10. How does a reversal affect previously assessed fees?
 
 1. **Ambiguity**: E9 cancels E7's debit — is the Day-2 overdraft fee (assessed because
    of E7) refunded?
-2. **Chosen policy**: no. Assessed fee entries are immutable; they stand. A refund
-   would require an explicit new business event (e.g. FEE_REVERSAL), which is not in
-   the stream.
+2. **Chosen policy** (business-policy choice): no. Assessed fee entries are
+   immutable; they stand. A refund would require an explicit new business event
+   (e.g. FEE_REVERSAL), which is not in the stream.
 3. **Why**: accounting-grade conservatism — a fee legitimately assessed against the
-   books as they stood is revenue that was earned/notified; rewriting it erases audit
+   books as they stood is a customer-visible fact; rewriting it erases audit
    history. Fee persistence is the whole point of "derived entry, replayable,
    idempotent".
-4. **Alternative**: recompute fees on every replay (fees as pure function of the final
-   stream) — then E9 would erase all three fees and criterion 6 would hold. Rejected:
-   makes fee income depend on event arrival order and rewrites customer-visible
-   charges retroactively.
+4. **Alternative**: recompute fees on every replay (fees as pure function of the
+   final stream). A defensible policy with a genuinely different outcome — under
+   full-knowledge recomputation, E9 removes the cause of every fee, so all three
+   fees would vanish and criterion 6 would hold. Not chosen: it makes fee income
+   depend on event arrival order and rewrites customer-visible charges
+   retroactively. The choice is a trade-off between auditability (chosen) and
+   counterfactual cleanliness (not chosen), not a matter of one side being
+   arithmetically wrong.
 5. **Consequence**: final Day-2 closing is 225.00, not 250.00; cumulative fees are
-   75.00 after E9 (criterion 6 is therefore REJECTED — see REJECTED.md).
-6. **Test**: `ReplayTest.e9DoesNotRemoveAssessedFees`.
+   75.00 after E9 (criterion 6 is therefore REJECTED under this policy — see
+   REJECTED.md). Note carefully what the final projection does and does not show:
+   Day 2's reconstructed pre-fee balance is +250.00 (positive), yet the Day-2 fee
+   remains. The fee was triggered by the books as known on the Day-5 evening, not
+   by the final reconstructed balance; the final projection is not evidence that
+   each historical fee would still fire had the complete stream been known in
+   advance (under full prior knowledge, no fee would have fired at all).
+6. **Test**: `ReplayTest.e9DoesNotRemoveAssessedFees`, and the focused
+   `LateEventFeeTest.alreadyAssessedFeeSurvivesALateEventThatMakesItsDatePositive`.
 
 ## 11. Are fee assessments recomputed after late events and reversals?
 
@@ -167,26 +255,46 @@ a documented, defensible decision.
 2. **Chosen policy**: yes for days never fee-assessed (a late event can reveal a
    historical overdraft — assessed on the current evening, valued on the historical
    day); never for days already assessed (no duplicates, no removals).
+   Re-examination happens ONLY at the defined processing-time boundaries (evenings
+   of completed processing dates and the window end — the exact trigger logic is in
+   #20); there is no per-event or mid-day assessment.
 3. **Why**: combines correctness (back-valued overdrafts are caught) with stability
    (charges never change once made).
 4. **Alternative**: never revisit — misses E7's Day-2 overdraft entirely and fails the
-   spec's core "late event affects earlier days" requirement.
+   spec's core "late event affects earlier days" requirement (a requirement, so this
+   alternative is non-conforming, not merely different).
 5. **Consequence**: all three fees are derived on the evening of processing Day 5,
-   valued on Days 2, 4, 5.
-6. **Test**: `BoundaryAndValidationTest.lateEventIsReflectedInFeeAssessmentOnlyAfterItIsProcessed`.
+   valued on Days 2, 4, 5. The full lifecycle (basis, boundaries, reconsideration,
+   immutability, valueDate vs derivedOnDate) is specified in #1.
+6. **Test**: `BoundaryAndValidationTest.lateEventIsReflectedInFeeAssessmentOnlyAfterItIsProcessed`,
+   `LateEventFeeTest.unassessedHistoricalDayIsReconsideredExactlyOnce`.
 
 ## 12. Which balance is the interest base?
 
 1. **Ambiguity**: pre-fee or post-fee closing balance?
 2. **Chosen policy**: post-fee closing (the actual ledger balance, per the spec's
    definition of ledger balance as including "previously generated fee entries").
+   Precisely: the base for date D is the FINAL end-of-window value-date projection
+   of the post-fee closing balance for D, taken BEFORE interest capitalization
+   (capitalization is computed from it, so it cannot include itself).
 3. **Why**: consistency — one definition of ledger balance used everywhere (fees,
    interest, available balance, report).
 4. **Alternative**: pre-fee base — would make Day-2 accrual 0.10 instead of 0.09 and
-   the capitalized total 0.94 instead of 0.93.
-5. **Consequence**: interest bases 250.00 / 225.00 / 625.00 / 415.00 / 390.00 / 390.00;
-   capitalized AED 0.93.
-6. **Test**: `ReplayTest.interestAccruesOnPositivePostFeeBalancesOnly`.
+   the capitalized total 0.94 instead of 0.93. A defensible business policy (some
+   banks pay interest on the pre-charge balance); not chosen because the spec's
+   ledger-balance definition includes fee entries.
+5. **Consequence** (verified against the implementation and the actual report):
+   bases D1 250.00, D2 225.00, D3 625.00, D4 415.00, D5 390.00, D6 390.00; daily
+   rounded accruals 0.10 / 0.09 / 0.25 / 0.17 / 0.16 / 0.16 summing to exactly
+   AED 0.93, capitalized ONCE as a single credit valued on the window-end date
+   (Day 6). These bases are **final historical projections** — the balances as
+   reconstructed from the complete stream — NOT necessarily the balances known on
+   each processing day (e.g. Day 2's base includes the Day-2 fee that was only
+   discovered on Day 5, and E7/E9's compensating pair). REJECTED.md and README.md
+   use the same "final projection" terminology.
+6. **Test**: `ReplayTest.interestAccruesOnPositivePostFeeBalancesOnly`,
+   `ReplayTest.capitalizedInterestEqualsSumOfRoundedDailyAccrualsExactly`,
+   `DailyProjectionTest`.
 
 ## 13. How is daily interest rounded and how is any residual reconciled?
 
@@ -309,24 +417,50 @@ assumption explicit but cannot eliminate it.
 6. **Test**: `ReplayTest.bhdInstalmentsConserveExactlyTenBhd` asserts valueDay == 5
    for all three.
 
-## 20. What happens when an event's processing day is EARLIER than one already seen?
+## 20. What happens when an event's processing date is EARLIER than one already seen?
 
 1. **Ambiguity**: E10 (processing Day 5) appears in the stream AFTER E9 (processing
-   Day 6). Strictly increasing days cannot be assumed.
-2. **Chosen policy**: stream order is authoritative; the event is applied when
-   reached. Evening assessments run when the processing day *advances*; a
-   late-for-its-day event is simply picked up by the next assessment run (its effects
-   are still correct in the final projection because projections are value-date based).
-3. **Why**: the spec's numbered list is explicit ("replay in this precise processing
-   order") and processing days are metadata on the event, not a reordering license.
+   Day 6). Strictly increasing processing dates cannot be assumed.
+2. **Chosen policy**: the supplied stream order is authoritative — events are NEVER
+   sorted, by processing date or by value date. Four concepts stay distinct:
+   - **Stream order**: the order events are applied in (the spec's "precise
+     processing order"); the envelope's `streamPosition` makes it explicit.
+   - **Processing date**: controls WHEN an event is processed and what is known at
+     each decision point (authorization inputs, fee-assessment timing).
+   - **Value date**: controls the accounting date accepted financial entries apply
+     to; balances and interest bases are always value-date projections.
+   - **Assessment boundaries**: fee assessment runs only when the processing date
+     ADVANCES past a completed date (evenings) and once at the window end.
+3. **The exact implemented behavior for a backwards-moving processing date**
+   (verified against `LedgerEngine.replay`, not aspirational): when E10 is reached
+   after E9, no boundary triggers (its processing date does not advance past Day 6,
+   the max seen). E10 is applied immediately, in stream order, deriving its three
+   instalment postings valued Day 5. Its effects are then considered at the NEXT
+   boundary that actually runs — here the window-end evening, whose assessment loop
+   examines EVERY window value date (windowStart..windowEnd) that has not been
+   fee-charged before, including Day 5. So nothing is skipped and nothing is
+   double-charged: coverage comes from the boundary assessments always scanning the
+   full window prefix, and idempotency comes from the account|valueDate key. It is
+   NOT "correct merely because projections are value-date based" — it is correct
+   because every boundary re-examines the whole window prefix for uncharged dates
+   and charged dates are never revisited.
+4. **Why**: the spec's numbered list is explicit ("replay in this precise processing
+   order") and processing dates are metadata on the event, not a reordering license.
    (Grouping by processing day was implemented first and abandoned when the
-   stream-order test caught it reordering E10 before E9 — see WORKLOG.)
-4. **Alternative**: reject non-monotone processing days — would reject a spec-mandated
-   input; grouping by day — violates the mandated order.
-5. **Consequence**: for this stream, numbers are identical under both readings (E10
-   touches only ACC-002 and no fee ever applies), but the log order now matches the
-   mandated E1..E10 sequence.
-6. **Test**: `ReplayTest.allTenEventsAreInTheLogInStreamOrder`.
+   stream-order test caught it applying E10 before E9 — see WORKLOG.)
+5. **Alternative**: reject non-monotone processing dates — would reject a
+   spec-mandated input, so non-conforming; grouping by day — the abandoned
+   implementation violated the mandated order (though grouping with preserved
+   stream order would be valid).
+6. **Consequence**: for this stream, figures are identical to a day-ordered reading
+   (E10 touches only ACC-002, which never goes negative), but the log order matches
+   the mandated E1..E10 sequence, and the worst case (a backward-dated-processing
+   event that creates a historical overdraft) is covered by the window-end
+   assessment — proven by test.
+7. **Test**: `ReplayTest.allTenEventsAreInTheLogInStreamOrder`,
+   `EventStreamTest.e9ThenE10NonMonotonicProcessingDatesAreHandledInStreamOrder`,
+   `BoundaryAndValidationTest.backwardProcessingDateEventIsCaughtAtWindowEndWithoutDuplicates`,
+   and `LateEventFeeTest` (late back-valued events vs assessed/unassessed dates).
 
 ## 21. Can a reversal target a non-financial or multi-part event?
 
