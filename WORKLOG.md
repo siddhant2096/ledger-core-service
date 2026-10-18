@@ -640,3 +640,72 @@ WORKLOG); (D) final verification and focused commits.
 - Verified no stale references to renamed tests or old figures remain (grep for
   225.00/390.93/0.93/e9DoesNotRemoveAssessedFees across docs: only intentional
   historical references remain).
+
+---
+
+# Phase 9 — final correctness review of LedgerEngine (boundary gating fix)
+
+## 2026-10-18 20:31 IST — Review findings (verified against the actual code)
+
+Inspected `LedgerEngine.replay`/`reconcileFees` against the four reported issues:
+
+1. **Non-monotonic processing dates / boundary coverage**: the boundary loop and
+   final loop already cover the full window prefix and are idempotent, so pure
+   backward movement cannot skip a date — EXCEPT via the defect in (3).
+2. **Fee reconciliation consistency (desired-vs-effective participation)**:
+   inspected `reconcileFees` pass structure. The claim "subsequent dates are
+   calculated using a fee that is about to be compensated" does NOT reproduce:
+   pass 1 builds bases from non-fee entries plus participation of exactly the
+   fees that will be effective after the boundary (desired membership ==
+   will-be-effective; charged-and-compensated dates are explicitly excluded).
+   Pinned the correct behavior with a cascade test that WOULD fail under the
+   described leak (F2's corrected D2 base is +15.00 only if F1's
+   about-to-be-compensated fee is excluded; a leaking implementation would see
+   -10.00 and wrongly retain F2). The test passes — no code change needed.
+3. **REAL DEFECT — out-of-window events advance the lifecycle clock**: the
+   evening-advance block ran BEFORE horizon validation, and
+   `lastProcessedDate` was set from any envelope. A first event with a
+   processing date beyond the window end (D7) pushed `lastProcessedDate` past
+   the window, so the final reconciliation loop ran ZERO evenings and a valid
+   late overdraft was never fee-assessed. Verified against the pre-fix engine
+   (ad284aa) in a scratch worktree: new regression test failed there with
+   "expected: <6> but was: <0>". FIX: `isWithinWindow` helper shared by the
+   boundary gate and the rejection path; out-of-window events are still logged
+   and rejected with exactly one outcome, but never advance the clock.
+4. **Determinism**: audited every collection feeding emitted output —
+   `chargedFeeDays`/`compensatedFeeDays` are LinkedHashSet (iteration = charge
+   order = ascending value date); `skippedFeeDays`, `desired`,
+   `desiredPreFeeBases`, `reversedEventIds`, `seenEventIds` are used for
+   membership/lookup only, never iterated for emission; `outcomes` and
+   `authorizations` are LinkedHashMap; accounts iterate in registration order.
+   No reliance on unspecified iteration order for any emitted entry or trace.
+   No code change needed; verified by replayIsDeterministic,
+   reportIsByteIdenticalAcrossReplays, and the new byte-determinism test on a
+   compensation-bearing replay.
+
+## 2026-10-18 20:45 IST — Implementation and tests
+
+- Fix: boundary gate on `isWithinWindow` + shared horizon helper (the only
+  production-code change; ~15 lines).
+- New `FeeReconciliationTest` (6 tests), all expectations derived by hand before
+  running:
+  - compensationOfEarlierFeeFlowsIntoLaterDatesAndCompensatesThemToo
+    (cascade: 3 charges then 3 compensations; finals 20.00/15.00/.../15.06);
+  - compensatedDateIsNeverRechargedButNewNegativeDatesAreCharged
+    (documented #28 policy: D1-D3 keep exactly one charge + one compensation;
+    new negatives D4/D5/D6 charged with derivedOn D5/D5/D6);
+  - outOfWindowEventDoesNotAdvanceBoundariesOrSuppressReconciliation
+    (the phase-9 defect regression);
+  - forwardBackwardForwardProcessingDatesReconcileAtNextBoundary
+    (backward D3 event's historical D2 overdraft caught at the D4 evening;
+    4 fees with exact value/derived dates; single capitalization 0.04);
+  - justifiedFeesAreNeverCompensated (6 fees, 0 compensations);
+  - replayWithCompensationsIsByteDeterministic.
+- `mvn test -Dtest=FeeReconciliationTest`: 6/6 pass on first run.
+- Pre-fix verification: same test file copied into a scratch worktree at
+  ad284aa -> the boundary-poisoning test fails with "expected: <6> but was:
+  <0>", proving the defect and the fix. Worktree removed afterwards.
+- Full suite: `mvn clean test` -> 94 tests, 0 failures — BUILD SUCCESS.
+- Intentional-failure tag run: 1 test, 1 failure (documented, expected).
+- Replay: figures unchanged (466.03 / 1.03 / 10.008 / 0.008) — the fix only
+  affects the defective out-of-window path. README test count 87 -> 94.

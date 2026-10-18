@@ -152,7 +152,16 @@ public final class LedgerEngine {
 
         LocalDate lastProcessedDate = null;
         for (EventEnvelope envelope : stream) {
-            if (lastProcessedDate == null || envelope.processingDate().isAfter(lastProcessedDate)) {
+            // Lifecycle boundaries are driven ONLY by in-window events. An
+            // out-of-horizon event is still logged and rejected with exactly
+            // one outcome, but it must not advance the processing clock: a
+            // rogue far-future processing date would otherwise push
+            // lastProcessedDate beyond windowEnd and suppress the final
+            // reconciliation (a real defect found in review: valid late events
+            // after such an event would never be fee-assessed).
+            boolean inWindow = isWithinWindow(envelope);
+            if (inWindow && (lastProcessedDate == null
+                    || envelope.processingDate().isAfter(lastProcessedDate))) {
                 // Evening boundary: every business date that has fully
                 // completed, from the last processed date (or window start) up
                 // to the day before the new processing date.
@@ -168,8 +177,10 @@ public final class LedgerEngine {
             outcomes.put(envelope.streamPosition(), processEvent(
                     envelope, entries, authorizations, reversedEventIds, seenEventIds, sequence));
         }
-        // Final evening(s): assess everything up to the window end, then
+        // Final evening(s): reconcile everything up to the window end, then
         // capitalize interest as the last derived entries of the window.
+        // lastProcessedDate only ever reflects IN-WINDOW events, so this loop
+        // always runs at least the window-end evening (when it is non-empty).
         LocalDate first = lastProcessedDate == null ? windowStart : lastProcessedDate;
         for (LocalDate evening = first; !evening.isAfter(windowEnd); evening = evening.plusDays(1)) {
             reconcileFees(evening, entries, feeTrace, skippedFees, feeCompensations,
@@ -198,10 +209,7 @@ public final class LedgerEngine {
             return new Outcome.Rejected("DUPLICATE_EVENT_ID: " + envelope.eventId()
                     + " was already processed at another stream position");
         }
-        if (envelope.processingDate().isBefore(windowStart)
-                || envelope.processingDate().isAfter(windowEnd)
-                || envelope.valueDate().isBefore(windowStart)
-                || envelope.valueDate().isAfter(windowEnd)) {
+        if (!isWithinWindow(envelope)) {
             // Outside the configured window the posting would be invisible to
             // fee assessment and interest, i.e. silently inconsistent — reject
             // loudly instead. See AMBIGUITIES.md.
@@ -601,6 +609,19 @@ public final class LedgerEngine {
 
     private Account findAccount(String accountId) {
         return accounts.stream().filter(a -> a.id().equals(accountId)).findFirst().orElse(null);
+    }
+
+    /**
+     * Window membership for BOTH dates of an envelope. This single rule gates
+     * two things consistently: (a) business acceptance (out-of-window events
+     * are rejected), and (b) lifecycle-boundary advancement in the replay loop
+     * (out-of-window events never move the processing clock).
+     */
+    private boolean isWithinWindow(EventEnvelope envelope) {
+        return !envelope.processingDate().isBefore(windowStart)
+                && !envelope.processingDate().isAfter(windowEnd)
+                && !envelope.valueDate().isBefore(windowStart)
+                && !envelope.valueDate().isAfter(windowEnd);
     }
 
     private Outcome checkCurrency(EventEnvelope envelope, Account account, Money amount) {
