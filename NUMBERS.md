@@ -5,15 +5,20 @@ mean, and whether it is a **supplied requirement** or an **implementation choice
 
 ## Business constants (supplied requirements)
 
-### Overdraft fee: 25.00 (in the account's own currency)
-- **Source**: supplied requirement ("Fee: AED 25.00"). Currency generalized to the
-  account's currency because no FX exists (AMBIGUITIES.md #15) — that generalization
-  is the implementation choice.
-- **Why appropriate**: it is the contract value. Encoded once as
-  `LedgerEngine.OVERDRAFT_FEE_AMOUNT = "25"` (scaled per currency: AED 25.00 /
-  BHD 25.000).
+### Overdraft fee: explicit per-currency schedule — AED 25.00, BHD 25.000
+- **Source**: AED 25.00 is a supplied requirement. BHD 25.000 is an explicit,
+  documented implementation choice (AMBIGUITIES.md #15): same numeric value in the
+  account's own currency, because no FX data exists. Encoded as configuration in
+  `Scenario.OVERDRAFT_FEE_SCHEDULE` (a `Map<CurrencyCode, Money>` validated by the
+  engine: fee currency must equal the key, fee must be positive). A currency absent
+  from the schedule is charged NOTHING, and the skip is recorded in the replay trace
+  (`SkippedFeeAssessment`) — no silent fees, no silent omissions.
+- **Why appropriate**: AED 25.00 is the contract value; making the schedule explicit
+  turns the BHD generalization from a silent fallback into a reviewable decision.
 - **Halving it** (12.50): would halve overdraft revenue and change every fee line and
   the final ACC-001 balance (390.93 → 428.43). Meaningful change, wrong contract.
+  Halving only the BHD entry (12.500) would be an independent, equally explicit
+  choice — unobservable in this scenario because ACC-002 never goes negative.
 
 ### Daily interest rate: 0.0004 (0.04%)
 - **Source**: supplied requirement.

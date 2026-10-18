@@ -17,7 +17,7 @@ The event stream is replayable from scratch and every replay is byte-identical.
 ## Commands
 
 ```bash
-# Run the normal test suite (62 tests; the deliberately failing test is excluded)
+# Run the normal test suite (76 tests; the deliberately failing test is excluded)
 mvn test
 
 # Replay the full event stream and print the six-day report
@@ -227,9 +227,11 @@ state lines; run the command for the full 169-line report.)
    fees**; a fee never triggers a second fee on the same day (idempotency key
    account+value day), and assessed fees are **not** retroactively removed by later
    reversals.
-2. The fee is denominated in the **account's own currency** (BHD 25.000 for ACC-002);
-   no AED amount is ever charged to a BHD account. No fee fires for ACC-002 here
-   (never negative).
+2. The overdraft fee is an **explicit per-currency schedule**
+   (`Scenario.OVERDRAFT_FEE_SCHEDULE`): AED 25.00 (supplied requirement), BHD 25.000
+   (documented choice). An AED amount is never charged to a BHD account; a currency
+   missing from the schedule is charged nothing, and the skip is recorded in the fee
+   trace. No fee fires for ACC-002 here (never negative).
 3. Authorization decisions use the books as **known at processing time** (E8 sees E7
    and is therefore DECLINED at −155.00 available). Holds are processing-time
    constructs; a settlement releases the entire hold (residual included).
@@ -270,7 +272,8 @@ src/main/java/com/ledger/core/service/
 └── Main.java               replays and prints
 src/test/java/com/ledger/core/service/
 ├── MoneyTest, InstalmentAllocatorTest, ReplayTest, ReversalTest,
-├── BoundaryAndValidationTest, ReportTest, BusinessDatesTest
+├── BoundaryAndValidationTest, ReportTest, BusinessDatesTest,
+├── EventStreamTest (per-event E1..E10), DailyProjectionTest (all six days)
 └── IntentionalFailureTest  (@Tag("intentional-failure"), excluded by default)
 ```
 

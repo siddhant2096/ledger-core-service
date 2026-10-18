@@ -161,10 +161,14 @@ in the same processing step. An invalid settlement creates **no** entry and cons
 
 ## Fee assessment idempotency and interaction with historical value dates
 
-- Each evening (processing day D), every account's value days `1..D` are examined in
-  ascending order. A day whose **pre-fee** closing balance (which includes previously
-  derived fee entries) is negative earns exactly one fee: 25 in the account's own
-  currency, `valueDay = assessed day`, `derivedOnDay = D`.
+- Each evening (processing date D), every account's value dates `windowStart..D` are
+  examined in ascending order. A date whose **pre-fee** closing balance (which
+  includes previously derived fee entries) is negative earns exactly one fee from the
+  **explicit per-currency fee schedule** injected into the engine
+  (`Scenario.OVERDRAFT_FEE_SCHEDULE`: AED 25.00 supplied; BHD 25.000 explicit choice).
+  A currency missing from the schedule yields a recorded `SkippedFeeAssessment` and
+  no entry — fees are never charged cross-currency and never skipped silently.
+  `valueDate = assessed date`, `derivedOnDate = D`.
 - Idempotency key: `(accountId, valueDay)`, marked **only when a fee is actually
   charged**. Non-negative days are re-examined on later evenings, which is what lets
   E7 (arriving Day 5) retroactively create a Day-2 fee — exactly once

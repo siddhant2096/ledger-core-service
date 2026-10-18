@@ -220,17 +220,33 @@ a documented, defensible decision.
 ## 15. Do fees apply to non-AED accounts?
 
 1. **Ambiguity**: the fee is specified as "AED 25.00", but ACC-002 is a BHD account.
-2. **Chosen policy**: the fee is 25 **in the account's own currency** (BHD 25.000 for
-   ACC-002). An AED amount is never charged to a BHD account — there is no FX rate in
-   the system, so any cross-currency charge would be inventing data.
-3. **Why**: the least-surprise policy that respects currency safety; the numeric
-   amount is the business constant, the currency follows the account.
-4. **Alternatives**: (a) no overdraft fees for non-AED accounts (fee policy is
-   AED-only) — defensible but arbitrary; (b) convert via an FX table — requires data
-   the spec does not supply.
-5. **Consequence**: none in this scenario (ACC-002 never goes negative); the behavior
-   is pinned by a dedicated test with a synthetic negative BHD account.
-6. **Test**: `BoundaryAndValidationTest.bhdAccountIsChargedBhdFeeNeverAed`.
+   Charging AED 25.00 to a BHD account is impossible (no FX data); charging
+   BHD 25.000 implicitly would be an undocumented assumption.
+2. **Chosen policy** (tightened 2026-10-18): the overdraft fee is an **explicit
+   per-currency schedule** injected into the engine (`Scenario.OVERDRAFT_FEE_SCHEDULE`).
+   The AED 25.00 entry is the supplied requirement. The BHD 25.000 entry is an
+   explicit, documented configuration choice (same numeric value in the account's
+   own currency — the least-surprise rule in the absence of FX data). A currency
+   ABSENT from the schedule is charged nothing: the engine records a
+   `SkippedFeeAssessment` (`NO_FEE_CONFIGURED_FOR_CURRENCY`) in the replay trace, so
+   the non-charge is itself audited — never a silent fee, never a silent omission.
+3. **Why**: an AED-denominated charge on a BHD account would be inventing FX data;
+   an implicit same-number fallback would be a silent policy. Explicit configuration
+   makes the BHD decision visible, reviewable, and changeable without touching the
+   engine. The engine validates the schedule at construction (fee currency == key,
+   fee positive).
+4. **Alternatives**: (a) AED-only fees (no fee for BHD accounts) — defensible, and
+   now achievable simply by removing BHD from the schedule; (b) FX conversion —
+   requires data the spec does not supply.
+5. **Consequence**: none in this scenario (ACC-002 never goes negative); behavior is
+   pinned by dedicated tests with synthetic negative BHD accounts, both WITH the
+   configured BHD fee (charged BHD 25.000) and WITHOUT it (skip recorded, no fee).
+6. **Test**: `BoundaryAndValidationTest.bhdAccountIsChargedExplicitlyConfiguredBhdFeeNeverAed`,
+   `accountInUnconfiguredCurrencyIsChargedNoFeeButTheSkipIsRecorded`.
+
+**Unresolved residue**: whether the business intends BHD overdrafts to be charged at
+all, and if so at what amount, remains a business decision — the schedule makes the
+assumption explicit but cannot eliminate it.
 
 ## 16. Is an event accepted into the log if business validation fails?
 

@@ -251,3 +251,37 @@ Plan: (A) explicit per-currency fee schedule + skipped-fee trace + tests;
 (B) per-event E1..E10 regression tests + all-six-days projection test + backward-date
 fee-catch test; (C) docs (AMBIGUITIES #15 rewrite + #27, NUMBERS, README touch-ups,
 WORKLOG); (D) final verification and focused commits.
+
+## 2026-10-18 18:50 IST — Stages A+B implemented and committed (538d814)
+
+- LedgerEngine now takes an explicit `Map<CurrencyCode, Money> overdraftFees`
+  schedule (validated at construction: currency==key, positive). AED 25.00 =
+  supplied requirement; BHD 25.000 = explicit documented choice in
+  `Scenario.OVERDRAFT_FEE_SCHEDULE`. Unconfigured currency -> no fee entry, and a
+  `SkippedFeeAssessment` (NO_FEE_CONFIGURED_FOR_CURRENCY) is recorded in the replay
+  trace and printed in the report's fee-trace section. `OVERDRAFT_FEE_AMOUNT`
+  constant removed.
+- Idempotency key extended: account|valueDate is marked when a fee DECISION is made
+  (charge or skip); non-negative dates stay re-examinable. Duplicate skips
+  impossible.
+- New tests: EventStreamTest (9 — one per event E1..E10 with inline derivations),
+  DailyProjectionTest (3 — both accounts x all six days: closing, active holds,
+  available, accrual, plus single-capitalization check),
+  BoundaryAndValidationTest gained
+  `accountInUnconfiguredCurrencyIsChargedNoFeeButTheSkipIsRecorded` and
+  `backwardProcessingDateEventIsCaughtAtWindowEndWithoutDuplicates`.
+- Test-run defect (mine, not the engine's): EventStreamTest.e3 asserted final auth
+  state APPROVED, but the registry snapshot after E5 is PARTIALLY_SETTLED; fixed the
+  test to assert E3's decision NOTE ("AUTH APPROVED") instead.
+- `mvn test`: 76 tests, 0 failures — BUILD SUCCESS.
+
+## 2026-10-18 18:55 IST — Stage C docs and final verification
+
+- Docs updated: AMBIGUITIES.md #15 rewritten (explicit per-currency fee schedule +
+  recorded skip; unresolved residue noted), NUMBERS.md fee entry rewritten,
+  ARCHITECTURE.md fee section updated, README.md assumptions/layout/test count (76).
+- Final verification from clean state: `mvn clean test` -> 76 tests, 0 failures,
+  BUILD SUCCESS. Intentional-failure tag run -> 1 test, 1 failure (documented,
+  expected). Full replay figures unchanged: ACC-001 390.93, fees -75.00, interest
+  0.93; ACC-002 10.008, interest 0.008; Auth-A PARTIALLY_SETTLED, Auth-B DECLINED,
+  E6 REJECTED (unknown authorization).
