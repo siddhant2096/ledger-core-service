@@ -397,6 +397,48 @@ class BoundaryAndValidationTest {
     }
 
     @Test
+    void duplicateEventIdCannotAffectEntriesAuthFeesOrInterest() {
+        // The duplicate carries a DIFFERENT event type (an authorization
+        // request) under an already-used id: it must be rejected as a duplicate
+        // and must not create an authorization, post entries, or change
+        // fee/interest derivation. The first occurrence stands.
+        ReplayResult result = run(List.of(AED_ACCOUNT), List.of(
+                env("X1", 1, 1, new LedgerEvent.Credit("A", Money.of("100.00", CurrencyCode.AED))),
+                env("X1", 2, 2, new LedgerEvent.AuthorizationRequest("A", "Auth-X",
+                        Money.of("50.00", CurrencyCode.AED)))));
+        Outcome dup = result.outcomeAt(2);
+        assertInstanceOf(Outcome.Rejected.class, dup);
+        assertTrue(((Outcome.Rejected) dup).reason().contains("DUPLICATE_EVENT_ID"));
+        // No authorization created by the duplicate.
+        assertTrue(result.authorizations().isEmpty());
+        // Exactly one posting (the first credit); interest is the only other
+        // entry and reflects the single 100.00 credit: 6 x round(100 x 0.0004)
+        // = 6 x 0.04 = 0.24, capitalized once.
+        assertEquals(2, result.entries().size());
+        assertTrue(result.feeTrace().isEmpty());
+        assertEquals(Money.of("100.24", CurrencyCode.AED),
+                LedgerEngine.closingBalance(result.entries(), AED_ACCOUNT, Scenario.day(6)));
+    }
+
+    @Test
+    void validationOrderIsDeterministic() {
+        // Documented order (AMBIGUITIES.md #27): duplicate id -> horizon ->
+        // account -> currency -> business rules. An event violating two rules
+        // gets the FIRST applicable reason.
+        LocalDate outside = Scenario.WINDOW_END.plusDays(1);
+        ReplayResult result = run(List.of(AED_ACCOUNT), List.of(
+                env("X1", 1, 1, new LedgerEvent.Credit("A", Money.of("100.00", CurrencyCode.AED))),
+                // duplicate id AND wrong currency: duplicate wins
+                env("X1", 2, 2, new LedgerEvent.Credit("A", Money.of("5.000", CurrencyCode.BHD))),
+                // out-of-horizon AND unknown account: horizon wins
+                new EventEnvelope("X3", position.incrementAndGet(), outside, outside,
+                        new LedgerEvent.Credit("GHOST", Money.of("1.00", CurrencyCode.AED)))));
+        assertTrue(((Outcome.Rejected) result.outcomeAt(2)).reason().contains("DUPLICATE_EVENT_ID"));
+        assertTrue(((Outcome.Rejected) result.outcomeAt(3)).reason()
+                .contains("EVENT_DATE_OUT_OF_HORIZON"));
+    }
+
+    @Test
     void duplicateStreamPositionIsADataContractViolation() {
         List<EventEnvelope> stream = List.of(
                 new EventEnvelope("X1", 7, Scenario.day(1), Scenario.day(1),

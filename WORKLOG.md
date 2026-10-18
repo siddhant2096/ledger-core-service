@@ -487,3 +487,45 @@ WORKLOG); (D) final verification and focused commits.
   README report header and REJECTED reference series; no contradictions found.
 - No application-code changes in this phase (inspection found no defect); the only
   code-side change is the added test file.
+
+---
+
+# Phase 7 — reconciliation with updated AMBIGUITIES.md
+
+## 2026-10-18 19:21 IST — Inspection and baseline
+
+- Repo clean at `3f2ff11`. Baseline: `mvn clean test` -> 85 tests, 0 failures.
+- Section-by-section reconciliation of code vs AMBIGUITIES.md:
+  - #23 time model: consistent. No stale int-day fields in production code (grep for
+    processingDay/valueDay finds only the report's display-label counter
+    `int dayNumber`, which renders alongside the real LocalDate — display label, not
+    a time model). No occurredAt/receivedAt anywhere except the javadoc explaining
+    their deliberate absence. Day n -> 2026-01-0n mapping in Scenario.day(n).
+  - Fees (#1/#2/#10/#11/#15/#20): assessFees scans the full window prefix
+    (windowStart..min(processingDate, windowEnd)) at every boundary; idempotency key
+    account|valueDate; fee trace carries valueDate AND assessedOnDate; default
+    schedule AED-only; SkippedFeeAssessment for unconfigured currencies. All
+    consistent with code and tests.
+  - Reversals (#9/#21/#22): validate -> post -> mark order confirmed in code;
+    ReversalTest covers unknown/poisoning, no-mutation, duplicate, cross-account,
+    unsupported kinds (fee ids, reversal-of-reversal), multi-entry compensation.
+  - Ordering/idempotency (#16/#17/#20/#25): covered by existing tests; found one
+    coverage gap worth closing: a duplicate event id carrying a DIFFERENT event type
+    (authorization) was not explicitly proven to leave auth state and interest
+    untouched.
+  - Validation order: deterministic in code (duplicate id -> horizon -> account ->
+    currency -> business rules) but not yet documented as a numbered ambiguity.
+
+## 2026-10-18 19:45 IST — Changes
+
+- Added `BoundaryAndValidationTest.duplicateEventIdCannotAffectEntriesAuthFeesOrInterest`
+  (duplicate id with a different event type: rejected, no authorization created, no
+  extra entries, interest unchanged: 6 x 0.04 = 0.24 -> closing 100.24) and
+  `validationOrderIsDeterministic` (duplicate-id beats currency-mismatch; horizon
+  beats unknown-account). Both passed on first run.
+- Added AMBIGUITIES.md #27 documenting the fixed validation order and its rationale.
+- No implementation changes — reconciliation found no code/doc contradictions.
+- Full suite after changes: `mvn clean test` -> 87 tests, 0 failures — BUILD SUCCESS.
+- Replay re-run: figures unchanged (ACC-001 390.93, fees 3x25.00 discovered
+  2026-01-05, interest 0.93; ACC-002 10.008, interest 0.008; Auth-A
+  PARTIALLY_SETTLED, Auth-B DECLINED, E6 rejected).

@@ -578,3 +578,29 @@ assumption explicit but cannot eliminate it.
    postings.
 6. **Test**: `BoundaryAndValidationTest.negativeAndZeroAmountsAreRejected`,
    `zeroTotalInstalmentCreditIsRejected`.
+
+## 27. In which order are validation rules applied (when an event violates several)?
+
+1. **Ambiguity**: an event can violate multiple rules at once (e.g. duplicate id AND
+   wrong currency). Which reason is reported?
+2. **Chosen policy** (implementation choice, deterministic): checks run in a fixed
+   order, first failure wins:
+   1. `DUPLICATE_EVENT_ID` — envelope identity (idempotent ingestion, #25);
+   2. `EVENT_DATE_OUT_OF_HORIZON` — window membership (#24);
+   3. `UNKNOWN_ACCOUNT` — account existence;
+   4. `CURRENCY_MISMATCH` — event currency vs account currency (first check inside
+      every handler);
+   5. handler-specific business rules in their documented order (e.g. settlement:
+      unknown authorization → account mismatch → not settleable → non-positive →
+      exceeds authorized amount; reversal: duplicate → unknown target →
+      unsupported kind → account mismatch).
+3. **Why**: structural/identity checks before business rules mirrors how the failure
+   would be diagnosed (is this even our event? is it in scope? does the account
+   exist? does the currency fit? is the business action valid?). A fixed order makes
+   rejection reasons deterministic across replays and testable.
+4. **Alternative**: collect ALL violations per event — more informative for bulk data
+   cleaning, but overkill for a strict ledger core and complicates the outcome model;
+   not chosen.
+5. **Consequence**: rejection reasons are stable and single; a caller fixing one
+   problem may reveal the next (acceptable for a strict ingestion path).
+6. **Test**: `BoundaryAndValidationTest.validationOrderIsDeterministic`.
