@@ -199,6 +199,52 @@ class FeeReconciliationTest {
     }
 
     // ---------------------------------------------------------------
+    // Test B': the exact review scenario — a date goes negative, is
+    // charged, is COMPENSATED AFTER A REVERSAL EVENT, and later becomes
+    // negative again due to another valid event.
+    //
+    // X1 -10@D1 -> F1 charged on the D1 evening (preFee -10.00).
+    // X2 +100@D2.
+    // X3 REVERSAL of X1 (proc D3, value D1) -> +10 compensation valued D1;
+    //   on the D3 evening the corrected D1 = -10 + 10 = 0.00 -> F1
+    //   compensated (FEE_REVERSAL +25.00 valued D1, derivedOn D3).
+    // X4 -50@D1 (proc D4, another valid back-valued event) -> D1 = -50.00
+    //   again. Documented policy (#28): charged-and-compensated dates are
+    //   NEVER re-charged. Finals: D1 -50.00, D2..D5 50.00, D6 50.10
+    //   (interest 5 x 0.02 = 0.10).
+    // ---------------------------------------------------------------
+    @Test
+    void compensatedDateIsNotRechargedWhenReversalCausedTheCompensation() {
+        ReplayResult result = run(List.of(
+                env(1, "X1", 1, 1, new LedgerEvent.Debit("A", aed("10.00"))),
+                env(2, "X2", 2, 2, new LedgerEvent.Credit("A", aed("100.00"))),
+                env(3, "X3", 3, 1, new LedgerEvent.Reversal("A", "X1")),
+                env(4, "X4", 4, 1, new LedgerEvent.Debit("A", aed("50.00")))));
+
+        // The reversal event posted its own compensation valued D1.
+        LedgerEntry reversalCompensation = result.entries().stream()
+                .filter(e -> e.sourceEventId().equals("X3")).findFirst().orElseThrow();
+        assertEquals(aed("10.00"), reversalCompensation.amount());
+        assertEquals(Scenario.day(1), reversalCompensation.valueDate());
+
+        // Exactly one charge and exactly one compensation, both for D1.
+        List<LedgerEntry> fees = entriesOfKind(result, EntryKind.FEE_OVERDRAFT);
+        assertEquals(1, fees.size());
+        assertEquals(Scenario.day(1), fees.getFirst().valueDate());
+        assertEquals(Scenario.day(1), fees.getFirst().derivedOnDate());
+        List<LedgerEntry> compensations = entriesOfKind(result, EntryKind.FEE_REVERSAL);
+        assertEquals(1, compensations.size());
+        assertEquals(Scenario.day(1), compensations.getFirst().valueDate());
+        assertEquals(Scenario.day(3), compensations.getFirst().derivedOnDate());
+
+        // D1 is negative again after X4 yet NOT re-charged (policy #28);
+        // no second FEE_OVERDRAFT for D1 exists anywhere.
+        assertEquals(aed("-50.00"), closing(result, 1)); // -10 -25 +25 +10 -50
+        assertEquals(aed("50.00"), closing(result, 2));  // -50 + 100
+        assertEquals(aed("50.10"), closing(result, 6));  // + 5 x 0.02 interest
+    }
+
+    // ---------------------------------------------------------------
     // Test C: regression for the boundary-poisoning defect. An
     // out-of-window event (processing D7 > window end) arrives FIRST.
     // It must be logged and rejected with exactly one outcome, and must

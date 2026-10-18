@@ -157,6 +157,41 @@ class ReversalTest {
     }
 
     @Test
+    void reversingAFeeCompensationEntryIsUnsupported() {
+        // A FEE_REVERSAL entry's deterministic source id is
+        // "FEE-REVERSAL-<account>-<date>". It is a derived compensation, not a
+        // POSTING, so reversing it is rejected — compensations cannot be
+        // reversed through the ordinary reversal event.
+        // Stream: debit -> fee D1; back-valued credit -> fee compensated on D2 evening.
+        String feeReversalSourceId = "FEE-REVERSAL-A-" + Scenario.day(1);
+        ReplayResult result = run(List.of(AED), List.of(
+                debit("X1", 1, "A", "10.00"),
+                env("X2", 2, 1, new LedgerEvent.Credit("A", Money.of("100.00", CurrencyCode.AED))),
+                reversal("R1", 3, "A", feeReversalSourceId)));
+        assertTrue(reason(result, "R1").contains("REVERSAL_UNSUPPORTED_TARGET"));
+        // The compensation entry is intact and still singular.
+        assertEquals(1, result.entries().stream()
+                .filter(e -> e.kind() == EntryKind.FEE_REVERSAL).count());
+    }
+
+    @Test
+    void reversingInterestIsUnreachableAndHarmless() {
+        // Interest capitalization entries are derived only AFTER the last
+        // event is processed, so no in-window event can target them: the
+        // deterministic id "INTEREST-<account>-<windowEnd>" resolves to
+        // REVERSAL_TARGET_UNKNOWN and derives nothing.
+        String interestId = "INTEREST-A-" + Scenario.WINDOW_END;
+        ReplayResult result = run(List.of(AED), List.of(
+                credit("X1", 1, "A", "100.00", CurrencyCode.AED),
+                reversal("R1", 2, "A", interestId)));
+        assertTrue(reason(result, "R1").contains("REVERSAL_TARGET_UNKNOWN"));
+        assertEquals(1, result.entries().stream()
+                .filter(e -> e.kind() == EntryKind.INTEREST_CAPITALIZATION).count());
+        assertEquals(Money.of("100.24", CurrencyCode.AED),
+                LedgerEngine.closingBalance(result.entries(), AED, Scenario.day(6)));
+    }
+
+    @Test
     void reversalOfAReversalIsRejected() {
         // R1's compensation entry is kind REVERSAL_COMPENSATION, which is not
         // a reversible POSTING — so re-reversing R1 is unsupported.

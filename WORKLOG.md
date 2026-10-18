@@ -753,3 +753,60 @@ Inspected `LedgerEngine.replay`/`reconcileFees` against the four reported issues
   discriminating test reference), #21 (settlement-reversal consequence), #25
   (strictly increasing positions; rejected events consume ids); README test count
   94 -> 101.
+
+---
+
+# Phase 11 — strict accounting review pass (mostly verification)
+
+## 2026-10-18 20:55 IST — Baseline and audit
+
+- Repo clean at `d9183c3`. Baseline: `mvn clean test` -> 101 tests, 0 failures.
+- reconcileFees audited line by line for the FOURTH time, this round specifically
+  hunting: (a) later fee that should not exist / missing fee that should exist —
+  none found, pass-1 participation provably tracks post-reconciliation effective
+  fees; (b) compensation flowing into later dates' eligibility — already proven by
+  `compensationOfEarlierFeeChangesLaterDatesEligibility`; (c) HashSet iteration
+  feeding output — none (audit repeated from phase 9).
+- Documentation-accuracy check ("pure function" claims): LedgerEngine's javadoc
+  already says "entries list PLUS the (charged, compensated) lifecycle sets" —
+  accurate. AMBIGUITIES #11 said "recomputed deterministically from non-fee
+  entries" WITHOUT mentioning lifecycle state — corrected (wording fix only).
+- AMBIGUITIES #28 item 5 claimed a "known limitation" (decision bases could differ
+  from the books in the re-negativing corner). The phase-9 audit suspected this was
+  wrong; the new re-negativing test's exact figures now PROVE it wrong (bases
+  exclude charged-and-compensated fees, matching the effective books). Corrected
+  the section and recorded the correction honestly.
+- #28 classification strengthened per the reviewer's question: "once per account
+  per day" constrains assessment frequency; whether a compensated date may earn a
+  NEW fee after re-negativing is a POLICY CHOICE not addressed by the spec or any
+  acceptance criterion (criterion 6 unaffected either way — no re-negativing occurs
+  in E1..E10). Policy kept; no code change.
+
+## 2026-10-18 21:05 IST — New regression tests (all hand-derived, passed first run)
+
+- `FeeReconciliationTest.compensatedDateIsNotRechargedWhenReversalCausedTheCompensation`:
+  the exact review scenario — debit -> fee -> REVERSAL event -> fee compensated
+  (D3 evening) -> new back-valued debit -> date negative again -> NOT re-charged.
+  Figures: F1 -25@D1 (derivedOn D1, preFee -10.00); compensation +25@D1
+  (derivedOn D3); final D1 -50.00, D2 50.00, D6 50.10 (5 x 0.02 interest).
+- `ReplayTest.e9RestoresExactlyThePreE7Projection_criterion6`: replays the stream
+  WITHOUT E7/E9 and asserts all six per-day closings AND the ACC-001 interest
+  trace are identical to the full stream (fees net to zero), while the full
+  stream's audit trail retains 3 charge + 3 compensation entries. Also documents
+  that authorization decisions are point-in-time and legitimately differ (Auth-B
+  would be approved without E7) — criterion 6 covers balances and fees, not
+  operational decisions.
+- `ReversalTest.reversingAFeeCompensationEntryIsUnsupported` (FEE_REVERSAL source
+  id -> REVERSAL_UNSUPPORTED_TARGET, compensation intact) and
+  `reversingInterestIsUnreachableAndHarmless` (interest entries are derived after
+  the last event, so the deterministic id resolves to REVERSAL_TARGET_UNKNOWN;
+  capitalization intact, balance 100.24).
+
+## 2026-10-18 21:10 IST — Verification
+
+- `mvn clean test`: 105 tests, 0 failures — BUILD SUCCESS.
+- Intentional-failure tag run: 1 test, 1 failure (documented, expected).
+- `mvn -q compile exec:java`: figures unchanged (466.03 / 1.03 / 10.008 / 0.008).
+- README test count 101 -> 105.
+- No production-code changes this phase: the audit found no reproducible defect
+  beyond those already fixed in phases 9-10.

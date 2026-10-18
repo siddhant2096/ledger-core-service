@@ -267,13 +267,16 @@ the "sequential fee-assessment balances" terminology in REJECTED.md):
 1. **Ambiguity**: when E7 arrives on Day 5, do we revisit Days 1–4?
 2. **Chosen policy**: yes — every boundary runs a full RECONCILIATION over the
    window prefix: the desired fee set is recomputed deterministically from non-fee
-   entries (sequential, fee-participating semantics, #1), then (a) never-charged
-   desired dates are charged (at most once ever), (b) charged dates no longer
-   desired are compensated via FEE_REVERSAL (at most once ever), (c) desired dates
-   already charged stay charged. Reconciliation happens ONLY at the defined
-   processing-time boundaries (evenings of completed processing dates and the
-   window end — the exact trigger logic is in #20); there is no per-event or
-   mid-day assessment.
+   entries (sequential, fee-participating semantics, #1) PLUS the
+   charged/compensated lifecycle state — it is NOT a pure function of the entries
+   list alone; the charge-once/compensate-once lifecycle sets are explicit inputs,
+   which keeps replay deterministic and each date's lifecycle unique. Then
+   (a) never-charged desired dates are charged (at most once ever), (b) charged
+   dates no longer desired are compensated via FEE_REVERSAL (at most once ever),
+   (c) desired dates already charged stay charged. Reconciliation happens ONLY at
+   the defined processing-time boundaries (evenings of completed processing dates
+   and the window end — the exact trigger logic is in #20); there is no per-event
+   or mid-day assessment.
 3. **Why**: combines correctness (back-valued overdrafts are caught; erroneous
    charges are corrected) with stability (each date is charged at most once and
    compensated at most once — no oscillation, no duplicates) and full auditability
@@ -677,21 +680,31 @@ assumption explicit but cannot eliminate it.
 
 1. **Ambiguity**: under reconciliation (#10, #11), a date can be charged, later
    compensated, and later still go negative again. Does it earn a second fee?
-2. **Chosen policy** (business-policy choice): no. "Assess once per account per day"
-   is read as ONE fee lifecycle per account-date: charge at most once, compensate
-   at most once, never re-charge. A date that goes negative after compensation
-   simply stays negative without a new fee.
-3. **Why**: the spec's "once per account per day" is the strongest textual anchor;
+   Classification (established in the final review): the specification's "assess
+   once per account per day" constrains ASSESSMENT frequency per day; whether a
+   compensated date may earn a NEW fee after re-negativing is NOT addressed by the
+   spec or by any acceptance criterion — this is a genuine policy choice, not a
+   requirement. (Criterion 6 is unaffected either way: it concerns restoration
+   after E9, and no re-negativing occurs in E1–E10.)
+2. **Chosen policy** (business-policy choice): no re-charge. One fee lifecycle per
+   account-date: charge at most once, compensate at most once, never re-charge. A
+   date that goes negative after compensation simply stays negative without a new
+   fee.
+3. **Why**: the spec's "once per account per day" is the closest textual anchor;
    re-charging would also let a single date accumulate multiple charge entries,
    complicating the audit story (which fee does a second compensation refer to?).
 4. **Alternative**: re-charge after compensation (a fresh fee episode). Defensible —
-   the date IS negative again — but it stretches "once per account per day" and adds
-   lifecycle complexity for a case that does not occur in the scenario.
-5. **Consequence / known limitation**: in the charge → compensate → negative-again
-   corner, the reconciliation's decision bases (which include desired-fee
-   participation) can differ slightly from the actual books (which contain no new
-   fee for that date). The corner is deterministic and documented; the scenario and
-   all tests exercise it only up to compensation, never re-negativing.
-6. **Test**: the charge-once/compensate-once invariants are enforced by
-   `LateEventFeeTest` (charge and compensation counts) and
-   `ReplayTest.replayIsDeterministic`.
+   the date IS negative again — and would change nothing in the supplied scenario;
+   it was not chosen because it stretches the "once per day" anchor and adds
+   lifecycle complexity for a case the window never exhibits.
+5. **Consequence**: deterministic; decision bases remain consistent with the
+   effective books because charged-and-compensated dates are excluded from
+   fee participation in the recomputation (verified by exact figures in the
+   re-negativing regression test — an earlier draft of this section claimed a
+   decision-basis discrepancy here; that claim was wrong and has been corrected
+   after the audit and test).
+6. **Test**:
+   `FeeReconciliationTest.compensatedDateIsNotRechargedWhenReversalCausedTheCompensation`
+   (the exact negative → charged → compensated-by-reversal → negative-again
+   scenario, with exact balances) and
+   `FeeReconciliationTest.compensatedDateIsNeverRechargedButNewNegativeDatesAreCharged`.

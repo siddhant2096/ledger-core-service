@@ -308,6 +308,46 @@ class ReplayTest {
     }
 
     @Test
+    void e9RestoresExactlyThePreE7Projection_criterion6() {
+        // Acceptance criterion 6, crisp form: replaying the stream WITHOUT
+        // E7/E9 yields the same per-day closings and the same interest as the
+        // full stream. (Filtering preserves strictly increasing positions.)
+        List<EventEnvelope> withoutE7E9 = Scenario.events().stream()
+                .filter(e -> !e.eventId().equals("E7") && !e.eventId().equals("E9"))
+                .toList();
+        ReplayResult preE7 = new LedgerEngine(Scenario.accounts(), Scenario.WINDOW_START,
+                Scenario.WINDOW_END, Scenario.BUSINESS_ZONE, Scenario.OVERDRAFT_FEE_SCHEDULE)
+                .replay(withoutE7E9);
+
+        // Pre-E7 books: no fees ever (every closing is positive), so the
+        // truncated replay has no fee entries at all; the full replay has 3
+        // charges + 3 compensations netting to zero. Both facts are asserted.
+        assertEquals(0, preE7.entries().stream()
+                .filter(e -> e.kind() == EntryKind.FEE_OVERDRAFT).count());
+        for (int day = 1; day <= 6; day++) {
+            assertEquals(
+                    LedgerEngine.closingBalance(preE7.entries(), acc001, day(day)),
+                    closing(acc001, day),
+                    "criterion 6: day " + day + " closing must return to its pre-E7 value");
+        }
+        // Interest bases identical too (fees net to zero) -> same accruals.
+        assertEquals(preE7.interestTrace().stream()
+                        .filter(a -> a.accountId().equals("ACC-001")).toList(),
+                result.interestTrace().stream()
+                        .filter(a -> a.accountId().equals("ACC-001")).toList());
+        // Audit trail distinction: the full stream KEEPS the charge and
+        // compensation entries (append-only) even though their net is zero.
+        assertEquals(3, result.entries().stream()
+                .filter(e -> e.kind() == EntryKind.FEE_OVERDRAFT).count());
+        assertEquals(3, result.entries().stream()
+                .filter(e -> e.kind() == EntryKind.FEE_REVERSAL).count());
+        // Note: criterion 6 says "balances and fees" — authorization DECISIONS
+        // are point-in-time and legitimately differ (without E7, Auth-B would
+        // be approved at 465.00 available); they are not balances and are not
+        // retroactively changed (AMBIGUITIES.md #3).
+    }
+
+    @Test
     void replayIsDeterministic() {
         ReplayResult again = Scenario.replay();
         assertEquals(result.entries(), again.entries());
