@@ -328,3 +328,38 @@ WORKLOG); (D) final verification and focused commits.
 7. Instalment conservation: already pinned (3.333/3.333/3.334 = 10.000).
 8. Report auth states and projection-vs-point-in-time distinction: already present;
    strengthened by the fee-line rewording.
+
+## 2026-10-18 18:55 IST — Phase-4 changes implemented and committed (8ce2caa)
+
+- Default `Scenario.OVERDRAFT_FEE_SCHEDULE` now contains ONLY AED 25.00 (the supplied
+  requirement). BHD fee removed from defaults; mechanism retained as configuration.
+  Tests restructured: `bhdAccountIsChargedNothingUnderTheDefaultAedOnlySchedule`
+  (skip recorded, no fee) and
+  `bhdAccountIsChargedConfiguredFeeOnlyWhenScheduleAuthorizesIt` (custom schedule).
+- Report fee line reworded: "OVERDRAFT FEE with value date today: 25.00 — pre-fee
+  balance was -370.00; fee first discovered and posted on processing date
+  2026-01-05" — value date vs discovery date are now unmistakable.
+- New tests: EventStreamTest.e9ThenE10NonMonotonicProcessingDatesAreHandledInStreamOrder;
+  BoundaryAndValidationTest.approvedButNeverSettledHoldPersistsThroughWindowEnd;
+  ReportTest.reportNeverClaimsAFeeWasKnowableOnItsValueDate; Auth-B zero-hold
+  assertions added to EventStreamTest.e8.
+- One test-authoring slip fixed before commit: missing `Authorization` import in
+  BoundaryAndValidationTest (compile error, fixed immediately).
+- `mvn test`: 79 tests, 0 failures — BUILD SUCCESS.
+
+## 2026-10-18 19:00 IST — Docs updated and final verification
+
+- AMBIGUITIES.md #15 rewritten (default schedule AED-only; BHD fee only as tested
+  configuration mechanism); NUMBERS.md fee entry updated; ARCHITECTURE.md fee
+  bullet updated (AED-only default, value-date vs discovery-date explicitness);
+  README.md example fee lines regenerated to the new wording, test count 79.
+- REJECTED.md gained a phase-4 section evaluating the requested "D4-D6 = 440.00"
+  figures: ACCEPTED for D1-D3 (250.00/225.00/625.00 — asserted in
+  DailyProjectionTest), REJECTED for D4-D6 with full arithmetic (D4/D5 closings were
+  -180.00/-205.00 on the D5 evening under any participation model, so their fees are
+  mandatory; 440.00 matches no self-consistent policy we could construct).
+- Final verification (all actually executed): `mvn clean test` -> 79 tests,
+  0 failures, BUILD SUCCESS; intentional-failure tag run -> 1 test, 1 failure with
+  the documented message; `mvn -q compile exec:java` -> report inspected, figures
+  unchanged (390.93 / 10.008 / fees 3x25.00 discovered 2026-01-05 / interest 0.93 /
+  0.008).

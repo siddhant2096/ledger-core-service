@@ -222,27 +222,30 @@ a documented, defensible decision.
 1. **Ambiguity**: the fee is specified as "AED 25.00", but ACC-002 is a BHD account.
    Charging AED 25.00 to a BHD account is impossible (no FX data); charging
    BHD 25.000 implicitly would be an undocumented assumption.
-2. **Chosen policy** (tightened 2026-10-18): the overdraft fee is an **explicit
-   per-currency schedule** injected into the engine (`Scenario.OVERDRAFT_FEE_SCHEDULE`).
-   The AED 25.00 entry is the supplied requirement. The BHD 25.000 entry is an
-   explicit, documented configuration choice (same numeric value in the account's
-   own currency — the least-surprise rule in the absence of FX data). A currency
-   ABSENT from the schedule is charged nothing: the engine records a
-   `SkippedFeeAssessment` (`NO_FEE_CONFIGURED_FOR_CURRENCY`) in the replay trace, so
-   the non-charge is itself audited — never a silent fee, never a silent omission.
+2. **Chosen policy** (tightened twice, latest 2026-10-18): the overdraft fee is an
+   **explicit per-currency schedule** injected into the engine
+   (`Scenario.OVERDRAFT_FEE_SCHEDULE`). The DEFAULT schedule contains ONLY the
+   supplied requirement, AED 25.00 — the requirements do not authorize a BHD fee, so
+   none is configured. A currency absent from the schedule is charged nothing: the
+   engine records a `SkippedFeeAssessment` (`NO_FEE_CONFIGURED_FOR_CURRENCY`) in the
+   replay trace, so the non-charge is itself audited — never a silent fee, never a
+   silent omission. The schedule mechanism supports a BHD fee purely as
+   configuration, for when the business explicitly authorizes one.
 3. **Why**: an AED-denominated charge on a BHD account would be inventing FX data;
-   an implicit same-number fallback would be a silent policy. Explicit configuration
-   makes the BHD decision visible, reviewable, and changeable without touching the
-   engine. The engine validates the schedule at construction (fee currency == key,
-   fee positive).
-4. **Alternatives**: (a) AED-only fees (no fee for BHD accounts) — defensible, and
-   now achievable simply by removing BHD from the schedule; (b) FX conversion —
-   requires data the spec does not supply.
+   shipping a BHD amount in the default configuration would be inventing a business
+   rule. Explicit, minimal configuration makes the decision visible, reviewable, and
+   changeable without touching the engine. The engine validates the schedule at
+   construction (fee currency == key, fee positive).
+4. **Alternatives**: (a) BHD 25.000 in the default schedule (same numeric value,
+   account currency — the least-surprise amount if a fee were authorized) — kept as
+   a tested mechanism but removed from the default because no requirement authorizes
+   it; (b) FX conversion — requires data the spec does not supply.
 5. **Consequence**: none in this scenario (ACC-002 never goes negative); behavior is
-   pinned by dedicated tests with synthetic negative BHD accounts, both WITH the
-   configured BHD fee (charged BHD 25.000) and WITHOUT it (skip recorded, no fee).
-6. **Test**: `BoundaryAndValidationTest.bhdAccountIsChargedExplicitlyConfiguredBhdFeeNeverAed`,
-   `accountInUnconfiguredCurrencyIsChargedNoFeeButTheSkipIsRecorded`.
+   pinned by dedicated tests with synthetic negative BHD accounts, both WITHOUT a
+   configured BHD fee (default: skip recorded, no fee) and WITH one (mechanism test:
+   charged BHD 25.000).
+6. **Test**: `BoundaryAndValidationTest.bhdAccountIsChargedNothingUnderTheDefaultAedOnlySchedule`,
+   `bhdAccountIsChargedConfiguredFeeOnlyWhenScheduleAuthorizesIt`.
 
 **Unresolved residue**: whether the business intends BHD overdrafts to be charged at
 all, and if so at what amount, remains a business decision — the schedule makes the

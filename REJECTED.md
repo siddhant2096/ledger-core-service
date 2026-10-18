@@ -166,6 +166,60 @@ independent of which reconciliation policy is in force.
 
 ---
 
+## Additional evaluated expectation (phase-4 review): "Days 4–6 = AED 440.00 pre-capitalization"
+
+A later review requested assertions for final AED value-date projections of
+D1 250.00, D2 225.00, D3 625.00, **D4–D6 440.00** before capitalization, "assuming
+E7 and E9 cancel and the AED 25 Day-2 fee remains".
+
+**Verdict: D1–D3 ACCEPTED (they match); the D4–D6 = 440.00 figure is REJECTED as
+incompatible with the stated fee rules.** This is an arithmetic finding, not a
+policy preference:
+
+The 440.00 figure implies exactly one fee (D2). But the fee rule is "assess once per
+account per day when that day's closing ledger balance is negative", and on the
+evening of processing Day 5 (after E7 posted, before E9 existed) the pre-fee
+closings were:
+
+- D2: 250.00 − 620.00 = **−370.00** → fee (this is the D2 fee, value date D2)
+- D3: −370.00 − 25.00 + 400.00 = +5.00 → no fee
+- D4: 5.00 − 185.00 = **−180.00** → fee
+- D5: −180.00 − 25.00 = **−205.00** → fee
+
+(Even WITHOUT fee participation in later bases, D4 = 30.00 − 185.00 = −155.00 and
+D5 = −155.00 — still negative, still charged.) So D4 and D5 fees are mandatory under
+the plain fee rule whenever all value dates are examined on the D5 evening. With
+those fees immutable (the documented policy this review also mandates), the final
+pre-capitalization projections are D4 = 415.00, D5 = 390.00, D6 = 390.00.
+
+The 440.00 figures can only be produced by a model that either:
+
+1. **erases the D4/D5 fees when E9 arrives** — retroactive erasure of assessed,
+   customer-visible charges, forbidden by the immutable-derived-entry policy; or
+2. **never assesses D4/D5 on the D5 evening despite their negative closings** —
+   violating "assess … when that day's closing ledger balance is negative" and the
+   review's own requirement that "all relevant value dates are examined"; or
+3. **assesses the current date using only events processed BEFORE that date**
+   (lagged assessment) plus targeted reassessment of back-valued dates only — a
+   coherent but contrived policy under which the D5 evening would ignore E7 (a known
+   fact) when closing D5, and which would still have charged D5 = −155.00 on any
+   non-lagged reading.
+
+All three were evaluated and rejected: (1) destroys audit history, (2) contradicts
+the fee rule's plain text, (3) trades one inconsistency for a stranger one (a date
+reported as −180.00 point-in-time yet never fee-charged).
+
+**Consequence**: D1 = 250.00, D2 = 225.00, D3 = 625.00 are asserted exactly as
+requested (`DailyProjectionTest`); D4–D6 are asserted as 415.00 / 390.00 / 390.00
+(pre-capitalization; D6 = 390.93 after the 0.93 capitalization). Note the
+interesting coincidence: 440.00 IS the correct figure under the alternative
+"recompute fees at window end" policy ONLY if the D2 fee were also erased — which
+would give 465.00, not 440.00 — so 440.00 matches no self-consistent policy we could
+construct. This mirrors original criterion 2 ("exactly one fee, on Day 2"), rejected
+above on the same arithmetic.
+
+---
+
 ## Approaches considered and abandoned during development
 
 (Only approaches actually evaluated while building this codebase; see WORKLOG.md for

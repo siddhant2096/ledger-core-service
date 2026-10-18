@@ -17,7 +17,7 @@ The event stream is replayable from scratch and every replay is byte-identical.
 ## Commands
 
 ```bash
-# Run the normal test suite (76 tests; the deliberately failing test is excluded)
+# Run the normal test suite (79 tests; the deliberately failing test is excluded)
 mvn test
 
 # Replay the full event stream and print the six-day report
@@ -98,7 +98,7 @@ Projection convention:
  Account ACC-001 (AED)
    closing ledger balance (final projection): 225.00
      of which overdraft fees valued on/before today: -25.00
-   OVERDRAFT FEE assessed for today: 25.00 — balance before this fee was -370.00 (assessment ran on processing date 2026-01-05)
+   OVERDRAFT FEE with value date today: 25.00 — pre-fee balance was -370.00; fee first discovered and posted on processing date 2026-01-05
    active holds: 200.00 (Auth-A)
    available balance: 25.00
    interest accrual for today: 0.09 (base 225.00 @ 0.0004 daily, positive balances only)
@@ -129,7 +129,7 @@ Projection convention:
  Account ACC-001 (AED)
    closing ledger balance (final projection): 415.00
      of which overdraft fees valued on/before today: -50.00
-   OVERDRAFT FEE assessed for today: 25.00 — balance before this fee was -180.00 (assessment ran on processing date 2026-01-05)
+   OVERDRAFT FEE with value date today: 25.00 — pre-fee balance was -180.00; fee first discovered and posted on processing date 2026-01-05
    active holds: 0.00
    available balance: 415.00
    interest accrual for today: 0.17 (base 415.00 @ 0.0004 daily, positive balances only)
@@ -147,7 +147,7 @@ Projection convention:
  Account ACC-001 (AED)
    closing ledger balance (final projection): 390.00
      of which overdraft fees valued on/before today: -75.00
-   OVERDRAFT FEE assessed for today: 25.00 — balance before this fee was -205.00 (assessment ran on processing date 2026-01-05)
+   OVERDRAFT FEE with value date today: 25.00 — pre-fee balance was -205.00; fee first discovered and posted on processing date 2026-01-05
    active holds: 0.00
    available balance: 390.00
    interest accrual for today: 0.16 (base 390.00 @ 0.0004 daily, positive balances only)
@@ -228,9 +228,9 @@ state lines; run the command for the full 169-line report.)
    account+value day), and assessed fees are **not** retroactively removed by later
    reversals.
 2. The overdraft fee is an **explicit per-currency schedule**
-   (`Scenario.OVERDRAFT_FEE_SCHEDULE`): AED 25.00 (supplied requirement), BHD 25.000
-   (documented choice). An AED amount is never charged to a BHD account; a currency
-   missing from the schedule is charged nothing, and the skip is recorded in the fee
+   (`Scenario.OVERDRAFT_FEE_SCHEDULE`) containing ONLY the supplied AED 25.00. An
+   AED amount is never charged to a BHD account; a currency missing from the
+   schedule (e.g. BHD) is charged nothing, and the skip is recorded in the fee
    trace. No fee fires for ACC-002 here (never negative).
 3. Authorization decisions use the books as **known at processing time** (E8 sees E7
    and is therefore DECLINED at −155.00 available). Holds are processing-time

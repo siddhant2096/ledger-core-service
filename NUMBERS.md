@@ -5,20 +5,20 @@ mean, and whether it is a **supplied requirement** or an **implementation choice
 
 ## Business constants (supplied requirements)
 
-### Overdraft fee: explicit per-currency schedule — AED 25.00, BHD 25.000
-- **Source**: AED 25.00 is a supplied requirement. BHD 25.000 is an explicit,
-  documented implementation choice (AMBIGUITIES.md #15): same numeric value in the
-  account's own currency, because no FX data exists. Encoded as configuration in
-  `Scenario.OVERDRAFT_FEE_SCHEDULE` (a `Map<CurrencyCode, Money>` validated by the
-  engine: fee currency must equal the key, fee must be positive). A currency absent
-  from the schedule is charged NOTHING, and the skip is recorded in the replay trace
-  (`SkippedFeeAssessment`) — no silent fees, no silent omissions.
-- **Why appropriate**: AED 25.00 is the contract value; making the schedule explicit
-  turns the BHD generalization from a silent fallback into a reviewable decision.
+### Overdraft fee: explicit per-currency schedule — default contains ONLY AED 25.00
+- **Source**: AED 25.00 is the supplied requirement. The default
+  `Scenario.OVERDRAFT_FEE_SCHEDULE` contains nothing else: the requirements do not
+  authorize a BHD fee, so none is configured (AMBIGUITIES.md #15). The engine
+  validates the schedule at construction (fee currency must equal the key, fee must
+  be positive); a currency absent from the schedule is charged NOTHING, and the skip
+  is recorded in the replay trace (`SkippedFeeAssessment`) — no silent fees, no
+  silent omissions. A BHD fee (e.g. BHD 25.000, same numeric value in account
+  currency) exists only as a tested configuration mechanism awaiting a business
+  decision.
+- **Why appropriate**: AED 25.00 is the contract value; everything else is
+  configuration rather than code.
 - **Halving it** (12.50): would halve overdraft revenue and change every fee line and
   the final ACC-001 balance (390.93 → 428.43). Meaningful change, wrong contract.
-  Halving only the BHD entry (12.500) would be an independent, equally explicit
-  choice — unobservable in this scenario because ACC-002 never goes negative.
 
 ### Daily interest rate: 0.0004 (0.04%)
 - **Source**: supplied requirement.
