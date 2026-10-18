@@ -77,17 +77,33 @@ public final class LedgerEngine {
         Set<String> reversedEventIds = new HashSet<>();
         long[] sequence = {0};
 
-        for (int day = 1; day <= horizonDays; day++) {
-            int processingDay = day;
-            for (EventEnvelope envelope : stream) {
-                if (envelope.processingDay() != processingDay) {
-                    continue;
+        // Events are applied strictly in stream order (the specification's
+        // "precise processing order"). Processing days are expected to be
+        // non-decreasing; whenever the processing day advances, the previous
+        // evening's fee assessment runs first (assessment covers ALL value
+        // days up to that day, so skipped empty days need no work). An event
+        // whose processing day is EARLIER than one already seen (E10 follows
+        // E9 in the stream: day 5 after day 6) is still applied in stream
+        // order and is picked up by the next assessment run — documented in
+        // AMBIGUITIES.md.
+        int lastProcessedDay = 0;
+        for (EventEnvelope envelope : stream) {
+            if (envelope.processingDay() > lastProcessedDay) {
+                // Evenings of every day that has fully completed: from the day
+                // we were last on (or day 1) up to the day before the new one.
+                for (int evening = Math.max(1, lastProcessedDay); evening < envelope.processingDay(); evening++) {
+                    assessFees(evening, entries, feeTrace, assessedFeeDays, sequence);
                 }
-                log.append(envelope);
-                outcomes.put(envelope.eventId(), processEvent(
-                        envelope, entries, authorizations, reversedEventIds, sequence));
+                lastProcessedDay = envelope.processingDay();
             }
-            assessFees(processingDay, entries, feeTrace, assessedFeeDays, sequence);
+            log.append(envelope);
+            outcomes.put(envelope.eventId(), processEvent(
+                    envelope, entries, authorizations, reversedEventIds, sequence));
+        }
+        // Final evening(s): assess everything up to the horizon, then
+        // capitalize interest as the last derived entries of the window.
+        for (int evening = Math.max(1, lastProcessedDay); evening <= horizonDays; evening++) {
+            assessFees(evening, entries, feeTrace, assessedFeeDays, sequence);
         }
         capitalizeInterest(entries, interestTrace, sequence);
 

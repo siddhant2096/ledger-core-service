@@ -40,3 +40,40 @@ Hand-computed expected results (to be cross-checked against the implementation):
 - Interest accruals ACC-001: 0.10, 0.09, 0.25, 0.17, 0.16, 0.16 -> capitalized 0.93 -> final 390.93.
 - ACC-002: closings 0.000 (D1-D4), 10.000 (D5), 10.000 (D6); accruals 0.004 + 0.004 = 0.008 capitalized -> final 10.008.
 - Auth-A: APPROVED (D2) -> PARTIALLY_SETTLED (185/200, residual 15.00 released). Auth-B: DECLINED. Auth-Z settlement: REJECTED (unknown authorization).
+
+## 2026-10-18 14:55 IST — Domain model implemented and committed
+
+- Wrote `domain.money` (CurrencyCode, Money, CurrencyMismatchException), `domain.account`, `domain.event` (sealed LedgerEvent + EventEnvelope), `domain.entry`, `domain.auth`, `domain.ledger` (append-only EventLog).
+- `mvn compile`: BUILD SUCCESS. Committed as `0c9ff10`.
+
+## 2026-10-18 15:00 IST — Engine, report, Main implemented and committed
+
+- Wrote `InstalmentAllocator`, `LedgerEngine`, `ReplayResult`, `ReportGenerator`, `Scenario`, `Main`.
+- First compile failed: missing import of `AuthorizationStatus` in ReportGenerator. Fixed.
+- Caught a real defect by reading my own code before running: the fee idempotency set marked account-days as "assessed" even when NO fee was charged, which would have prevented the Day-2 fee from ever being assessed when E7 arrived on Day 5. Fixed: only account-days with an actually charged fee are marked; non-negative days are re-examined on later evenings.
+- Ran `mvn compile exec:java`. Full six-day report matched the hand-derived numbers from the plan exactly (ACC-001 final 390.93, fees 3 x 25.00 valued on days 2/4/5, interest 0.93; ACC-002 final 10.008, instalments 3.333/3.333/3.334).
+- Correction to plan arithmetic: I had hand-computed the ledger balance at E8 processing time as -555.00 (forgot E4 +400.00); the engine's -155.00 is correct. Auth-B is DECLINED either way.
+- Committed as `f259ece`.
+
+## 2026-10-18 15:13 IST — Tests written; three failures found and fixed
+
+- Wrote MoneyTest (7), InstalmentAllocatorTest (4), ReplayTest (16), BoundaryAndValidationTest (12), ReportTest (6), IntentionalFailureTest (1, tagged `intentional-failure`).
+- First `mvn test` run: 45 tests, 3 genuine failures:
+  1. `ReplayTest.allTenEventsAreInTheLogInStreamOrder`: log order was E1..E8,E10,E9. Root cause: the engine grouped events by processing day, which reordered the stream (E10, processing day 5, was applied before E9, position 9 in the stream). The specification mandates the precise stream order as the processing order. FIX (production code): engine now applies events strictly in stream order and runs end-of-day fee assessment when the processing day advances; an event with an earlier processing day than one already seen (E10 after E9) is still applied in order and picked up by the next assessment. Documented in AMBIGUITIES.md.
+  2. `BoundaryAndValidationTest.negativeBalanceEarnsNoInterest`: my expected value was internally inconsistent (asserted 1 fee, then reasoned 6). Correct derived value: 6 fees (every day closes negative). Fixed the test.
+  3. `InstalmentAllocatorTest.remainderOfTwoMinorUnitsGoesToTheLastTwoInstalments`: arithmetic slip — 1000 minor units / 3 = 333 remainder 1, not 2. Changed the case to AED 10.01 (1001 = 333 r 2) so it actually tests a remainder of 2. Fixed the test.
+- After fixes: `mvn test` → Tests run: 45, Failures: 0, Errors: 0 — BUILD SUCCESS.
+
+## 2026-10-18 15:20 IST — Intentional-failure test verified
+
+- Ran `mvn test -Dsurefire.groups=intentional-failure -Dsurefire.excludedGroups=`: exactly 1 test run, 1 failure, with the documented message (Day-2 closing 250.00 as known at end of Day 2 vs 225.00 in the final projection). Failure is the intended demonstration; normal suite stays green and isolated.
+
+## 2026-10-18 15:22 IST — Independent recomputation of key figures
+
+Cross-checked engine output by hand (value-date order, ACC-001):
+- Source postings: +1200.00@1, -950.00@1, -620.00@2 (E7), +620.00@2 (E9), +400.00@3, -185.00@4.
+- Pre-fee closings as computable at end of Day 5: D1 250.00; D2 -370.00; D3 -370-25+400=5.00 (fee participation); D4 5-185=-180.00; D5 -180-25=-205.00 -> fees D2, D4, D5 = 75.00 total.
+- Final closings: D1 250.00, D2 250-25=225.00, D3 625.00, D4 415.00, D5 390.00, D6 390.00.
+- Interest: 250x0.0004=0.1000->0.10; 225->0.09; 625->0.25; 415->0.1660->0.17; 390->0.1560->0.16; 390->0.16. Sum 0.93 -> final 390.93.
+- ACC-002: 3.333+3.333+3.334=10.000 exactly; 10.000x0.0004=0.004000->0.004 (D5, D6); capitalized 0.008 -> final 10.008.
+- All match the engine report. No discrepancies.
