@@ -41,7 +41,7 @@ class BoundaryAndValidationTest {
 
     private ReplayResult run(List<Account> accounts, List<EventEnvelope> events) {
         return new LedgerEngine(accounts, Scenario.WINDOW_START, Scenario.WINDOW_END,
-                Scenario.BUSINESS_ZONE).replay(events);
+                Scenario.BUSINESS_ZONE, Scenario.OVERDRAFT_FEE_SCHEDULE).replay(events);
     }
 
     @Test
@@ -105,15 +105,41 @@ class BoundaryAndValidationTest {
     }
 
     @Test
-    void bhdAccountIsChargedBhdFeeNeverAed() {
-        // Policy: the overdraft fee is denominated in the account's own
-        // currency (no FX table exists). A negative BHD account pays BHD 25.000.
+    void bhdAccountIsChargedExplicitlyConfiguredBhdFeeNeverAed() {
+        // Policy: the fee comes from an EXPLICIT per-currency schedule
+        // (Scenario.OVERDRAFT_FEE_SCHEDULE), denominated in the account's own
+        // currency (no FX table exists). A negative BHD account pays the
+        // configured BHD 25.000 — a documented configuration choice, never a
+        // silent application of the AED requirement's numeric value.
         ReplayResult result = run(List.of(BHD_ACCOUNT), List.of(
                 env("X1", 1, 1, new LedgerEvent.Debit("B", Money.of("1.000", CurrencyCode.BHD)))));
         assertEquals(Money.of("25.000", CurrencyCode.BHD), result.feeTrace().getFirst().feeAmount());
         assertEquals(CurrencyCode.BHD, result.entries().stream()
                 .filter(e -> e.kind() == EntryKind.FEE_OVERDRAFT)
                 .findFirst().orElseThrow().amount().currency());
+    }
+
+    @Test
+    void accountInUnconfiguredCurrencyIsChargedNoFeeButTheSkipIsRecorded() {
+        // A fee schedule WITHOUT BHD: a negative BHD account must NOT be
+        // charged (no silent cross-currency fee) and the skip must be visible
+        // in the trace (no silent omission either).
+        ReplayResult result = new LedgerEngine(List.of(BHD_ACCOUNT),
+                Scenario.WINDOW_START, Scenario.WINDOW_END, Scenario.BUSINESS_ZONE,
+                java.util.Map.of(CurrencyCode.AED, Money.of("25.00", CurrencyCode.AED)))
+                .replay(List.of(env("X1", 1, 1,
+                        new LedgerEvent.Debit("B", Money.of("1.000", CurrencyCode.BHD)))));
+        assertEquals(0, result.entries().stream()
+                .filter(e -> e.kind() == EntryKind.FEE_OVERDRAFT).count());
+        assertTrue(result.feeTrace().isEmpty());
+        assertEquals(6, result.skippedFees().size()); // D1..D6 all negative, one skip each
+        assertEquals("NO_FEE_CONFIGURED_FOR_CURRENCY BHD", result.skippedFees().getFirst().reason());
+        assertEquals(Scenario.day(1), result.skippedFees().getFirst().valueDate());
+        assertEquals(Money.of("-1.000", CurrencyCode.BHD),
+                result.skippedFees().getFirst().preFeeBalance());
+        // Exactly one skip per account-date: the idempotency key also covers skips.
+        assertEquals(6, result.skippedFees().stream()
+                .map(s -> s.valueDate()).distinct().count());
     }
 
     @Test
@@ -271,6 +297,36 @@ class BoundaryAndValidationTest {
     }
 
     @Test
+    void backwardProcessingDateEventIsCaughtAtWindowEndWithoutDuplicates() {
+        // X1 processed D6 (the maximum date), then X2 processed D2 (moves
+        // backwards) valued D1 — a debit that makes D1 negative. The evenings
+        // for D1..D5 ran BEFORE X2 existed, so only the window-end evening can
+        // catch the D1 overdraft: no date must be skipped and none assessed
+        // twice.
+        ReplayResult result = run(List.of(AED_ACCOUNT), List.of(
+                env("X1", 6, 6, new LedgerEvent.Credit("A", Money.of("5.00", CurrencyCode.AED))),
+                env("X2", 2, 1, new LedgerEvent.Debit("A", Money.of("50.00", CurrencyCode.AED)))));
+        assertEquals(Scenario.day(1), result.feeTrace().getFirst().valueDate());
+        assertEquals(Scenario.day(6), result.feeTrace().getFirst().assessedOnDate());
+        assertEquals(Money.of("-50.00", CurrencyCode.AED),
+                result.feeTrace().getFirst().preFeeBalance());
+        // The negativity carries forward (fees participate in later bases):
+        // D1 -50 -> fee; D2 -75 -> fee; D3 -100; D4 -125; D5 -150; D6 -170+5
+        // = -165 -> fee. All six dates are negative, so exactly 6 fees, one
+        // per account-date, all assessed on the D6 evening.
+        assertEquals(6, result.feeTrace().size());
+        assertEquals(6, result.feeTrace().stream().map(f -> f.valueDate()).distinct().count());
+        assertTrue(result.feeTrace().stream()
+                .allMatch(f -> f.assessedOnDate().equals(Scenario.day(6))));
+        // And a second replay derives byte-identical entries (idempotency).
+        ReplayResult again = run(List.of(AED_ACCOUNT), List.of(
+                env("X1", 6, 6, new LedgerEvent.Credit("A", Money.of("5.00", CurrencyCode.AED))),
+                env("X2", 2, 1, new LedgerEvent.Debit("A", Money.of("50.00", CurrencyCode.AED)))));
+        assertEquals(result.entries(), again.entries());
+        assertEquals(result.feeTrace(), again.feeTrace());
+    }
+
+    @Test
     void eventDatesOutsideTheWindowAreRejected() {
         // A posting valued or processed outside the configured window would be
         // invisible to fee assessment and interest — a silent inconsistency.
@@ -319,7 +375,8 @@ class BoundaryAndValidationTest {
                 new EventEnvelope("X2", 7, Scenario.day(1), Scenario.day(1),
                         new LedgerEvent.Credit("A", Money.of("1.00", CurrencyCode.AED))));
         LedgerEngine engine = new LedgerEngine(List.of(AED_ACCOUNT),
-                Scenario.WINDOW_START, Scenario.WINDOW_END, Scenario.BUSINESS_ZONE);
+                Scenario.WINDOW_START, Scenario.WINDOW_END, Scenario.BUSINESS_ZONE,
+                Scenario.OVERDRAFT_FEE_SCHEDULE);
         assertThrows(IllegalArgumentException.class, () -> engine.replay(stream));
     }
 }

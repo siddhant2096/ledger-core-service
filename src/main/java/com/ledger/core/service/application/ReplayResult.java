@@ -26,6 +26,7 @@ public record ReplayResult(
         List<LedgerEntry> entries,
         Map<String, Authorization> authorizations,
         List<FeeAssessment> feeTrace,
+        List<SkippedFeeAssessment> skippedFees,
         List<DailyAccrual> interestTrace) {
 
     /** Outcome of processing one source event. */
@@ -42,6 +43,16 @@ public record ReplayResult(
     /** One overdraft fee assessment, kept for the audit trace in the report. */
     public record FeeAssessment(String accountId, LocalDate valueDate, LocalDate assessedOnDate,
                                 Money preFeeBalance, Money feeAmount) {
+    }
+
+    /**
+     * An account-date whose closing balance was negative but NO fee was
+     * charged because the fee schedule has no entry for the account's
+     * currency. Recorded (never silent) so the books show the decision; no
+     * ledger entry is derived.
+     */
+    public record SkippedFeeAssessment(String accountId, LocalDate valueDate, LocalDate assessedOnDate,
+                                       Money preFeeBalance, String reason) {
     }
 
     /** One day's interest accrual line, kept for the report (not a ledger entry). */

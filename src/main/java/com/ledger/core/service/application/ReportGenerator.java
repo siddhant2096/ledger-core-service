@@ -3,6 +3,7 @@ package com.ledger.core.service.application;
 import com.ledger.core.service.application.ReplayResult.DailyAccrual;
 import com.ledger.core.service.application.ReplayResult.FeeAssessment;
 import com.ledger.core.service.application.ReplayResult.Outcome;
+import com.ledger.core.service.application.ReplayResult.SkippedFeeAssessment;
 import com.ledger.core.service.domain.account.Account;
 import com.ledger.core.service.domain.auth.Authorization;
 import com.ledger.core.service.domain.auth.AuthorizationStatus;
@@ -157,6 +158,13 @@ public final class ReportGenerator {
                     .append(" pre-fee balance ").append(fmt(fee.preFeeBalance()))
                     .append(" -> fee ").append(fmt(fee.feeAmount()))
                     .append(" (fee value date = assessed date ").append(fee.valueDate()).append(")\n");
+        }
+        for (SkippedFeeAssessment skip : result.skippedFees()) {
+            out.append(" assessed on ").append(skip.assessedOnDate())
+                    .append(": ").append(skip.accountId())
+                    .append(" value date ").append(skip.valueDate())
+                    .append(" pre-fee balance ").append(fmt(skip.preFeeBalance()))
+                    .append(" -> NO FEE CHARGED (").append(skip.reason()).append(")\n");
         }
     }
 

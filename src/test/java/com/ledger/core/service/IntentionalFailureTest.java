@@ -59,7 +59,8 @@ class IntentionalFailureTest {
                 .filter(e -> !e.processingDate().isAfter(Scenario.day(2)))
                 .toList();
         ReplayResult earlyView = new LedgerEngine(Scenario.accounts(), Scenario.WINDOW_START,
-                Scenario.WINDOW_END, Scenario.BUSINESS_ZONE).replay(knownByEndOfDay2);
+                Scenario.WINDOW_END, Scenario.BUSINESS_ZONE, Scenario.OVERDRAFT_FEE_SCHEDULE)
+                .replay(knownByEndOfDay2);
         Money day2AsKnownThen = LedgerEngine.closingBalance(earlyView.entries(), acc001,
                 Scenario.day(2));
         assertEquals(Money.of("250.00", CurrencyCode.AED), day2AsKnownThen); // sanity: this holds

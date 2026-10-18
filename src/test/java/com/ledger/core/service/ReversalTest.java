@@ -43,7 +43,7 @@ class ReversalTest {
 
     private ReplayResult run(List<Account> accounts, List<EventEnvelope> events) {
         return new LedgerEngine(accounts, Scenario.WINDOW_START, Scenario.WINDOW_END,
-                Scenario.BUSINESS_ZONE).replay(events);
+                Scenario.BUSINESS_ZONE, Scenario.OVERDRAFT_FEE_SCHEDULE).replay(events);
     }
 
     private EventEnvelope credit(String id, int day, String account, String amount, CurrencyCode c) {

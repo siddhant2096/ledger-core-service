@@ -3,6 +3,7 @@ package com.ledger.core.service.application;
 import com.ledger.core.service.application.ReplayResult.DailyAccrual;
 import com.ledger.core.service.application.ReplayResult.FeeAssessment;
 import com.ledger.core.service.application.ReplayResult.Outcome;
+import com.ledger.core.service.application.ReplayResult.SkippedFeeAssessment;
 import com.ledger.core.service.domain.account.Account;
 import com.ledger.core.service.domain.auth.Authorization;
 import com.ledger.core.service.domain.auth.AuthorizationStatus;
@@ -11,6 +12,7 @@ import com.ledger.core.service.domain.entry.LedgerEntry;
 import com.ledger.core.service.domain.event.EventEnvelope;
 import com.ledger.core.service.domain.event.LedgerEvent;
 import com.ledger.core.service.domain.ledger.EventLog;
+import com.ledger.core.service.domain.money.CurrencyCode;
 import com.ledger.core.service.domain.money.CurrencyMismatchException;
 import com.ledger.core.service.domain.money.Money;
 
@@ -62,9 +64,6 @@ import java.util.Set;
  */
 public final class LedgerEngine {
 
-    /** Business constant: overdraft fee, 25 in the ACCOUNT's own currency. See NUMBERS.md. */
-    public static final String OVERDRAFT_FEE_AMOUNT = "25";
-
     /** Business constant: daily interest rate 0.04% = 0.0004. See NUMBERS.md. */
     public static final String DAILY_RATE = "0.0004";
 
@@ -72,22 +71,42 @@ public final class LedgerEngine {
     private final LocalDate windowStart;
     private final LocalDate windowEnd;
     private final ZoneId businessZone;
+    private final Map<CurrencyCode, Money> overdraftFees;
 
     /**
-     * @param accounts     iteration order = registration order (keeps output deterministic)
-     * @param windowStart  first business date of the replay window (inclusive)
-     * @param windowEnd    last business date of the replay window (inclusive);
-     *                     interest is capitalized on this date
-     * @param businessZone explicit zone for deriving business dates from instants
+     * @param accounts       iteration order = registration order (keeps output deterministic)
+     * @param windowStart    first business date of the replay window (inclusive)
+     * @param windowEnd      last business date of the replay window (inclusive);
+     *                       interest is capitalized on this date
+     * @param businessZone   explicit zone for deriving business dates from instants
+     * @param overdraftFees  EXPLICIT per-currency overdraft fee schedule. The fee
+     *                       is only ever charged in the account's own currency and
+     *                       only when that currency is configured: a negative
+     *                       account in an unconfigured currency is recorded as a
+     *                       {@code SkippedFeeAssessment} — visible in the trace,
+     *                       never silently charged and never silently ignored.
+     *                       (The specification supplies only "AED 25.00"; any other
+     *                       currency's fee is an explicit configuration decision.
+     *                       See AMBIGUITIES.md #15.)
      */
     public LedgerEngine(List<Account> accounts, LocalDate windowStart, LocalDate windowEnd,
-                        ZoneId businessZone) {
+                        ZoneId businessZone, Map<CurrencyCode, Money> overdraftFees) {
         this.accounts = List.copyOf(accounts);
         this.windowStart = Objects.requireNonNull(windowStart, "windowStart");
         this.windowEnd = Objects.requireNonNull(windowEnd, "windowEnd");
         this.businessZone = Objects.requireNonNull(businessZone, "businessZone");
+        this.overdraftFees = Map.copyOf(Objects.requireNonNull(overdraftFees, "overdraftFees"));
         if (windowEnd.isBefore(windowStart)) {
             throw new IllegalArgumentException("windowEnd must not be before windowStart");
+        }
+        for (Map.Entry<CurrencyCode, Money> fee : overdraftFees.entrySet()) {
+            if (fee.getValue().currency() != fee.getKey()) {
+                throw new IllegalArgumentException("fee schedule currency mismatch: key "
+                        + fee.getKey() + " but amount " + fee.getValue());
+            }
+            if (!fee.getValue().isPositive()) {
+                throw new IllegalArgumentException("fee must be positive: " + fee.getValue());
+            }
         }
     }
 
@@ -113,6 +132,7 @@ public final class LedgerEngine {
         List<LedgerEntry> entries = new ArrayList<>();
         Map<String, Authorization> authorizations = new LinkedHashMap<>();
         List<FeeAssessment> feeTrace = new ArrayList<>();
+        List<SkippedFeeAssessment> skippedFees = new ArrayList<>();
         List<DailyAccrual> interestTrace = new ArrayList<>();
         Set<String> assessedFeeDays = new HashSet<>(); // "accountId|valueDate"
         Set<String> reversedEventIds = new HashSet<>();
@@ -128,7 +148,7 @@ public final class LedgerEngine {
                 LocalDate first = lastProcessedDate == null ? windowStart : lastProcessedDate;
                 for (LocalDate evening = first; evening.isBefore(envelope.processingDate());
                      evening = evening.plusDays(1)) {
-                    assessFees(evening, entries, feeTrace, assessedFeeDays, sequence);
+                    assessFees(evening, entries, feeTrace, skippedFees, assessedFeeDays, sequence);
                 }
                 lastProcessedDate = envelope.processingDate();
             }
@@ -140,11 +160,12 @@ public final class LedgerEngine {
         // capitalize interest as the last derived entries of the window.
         LocalDate first = lastProcessedDate == null ? windowStart : lastProcessedDate;
         for (LocalDate evening = first; !evening.isAfter(windowEnd); evening = evening.plusDays(1)) {
-            assessFees(evening, entries, feeTrace, assessedFeeDays, sequence);
+            assessFees(evening, entries, feeTrace, skippedFees, assessedFeeDays, sequence);
         }
         capitalizeInterest(entries, interestTrace, sequence);
 
-        return new ReplayResult(accounts, log, outcomes, entries, authorizations, feeTrace, interestTrace);
+        return new ReplayResult(accounts, log, outcomes, entries, authorizations, feeTrace,
+                skippedFees, interestTrace);
     }
 
     // ------------------------------------------------------------------
@@ -383,8 +404,11 @@ public final class LedgerEngine {
      * date v in the window up to that date that has never been fee-assessed,
      * the pre-fee closing balance (which already includes all previously
      * derived fee entries) is computed; if negative, exactly one fee entry is
-     * derived with value date v. Because historical value dates are
-     * re-examined whenever new events arrive, a late back-valued debit
+     * derived with value date v — in the account's own currency and only if
+     * that currency has an explicitly configured fee. A negative account-date
+     * in an UNCONFIGURED currency is recorded as a {@link SkippedFeeAssessment}
+     * (visible, audited) and no fee is posted. Because historical value dates
+     * are re-examined whenever new events arrive, a late back-valued debit
      * correctly creates a fee for its value date — but never twice
      * (idempotency key account|valueDate), and existing fees are never
      * removed.
@@ -392,6 +416,7 @@ public final class LedgerEngine {
     private void assessFees(LocalDate processingDate,
                             List<LedgerEntry> entries,
                             List<FeeAssessment> feeTrace,
+                            List<SkippedFeeAssessment> skippedFees,
                             Set<String> assessedFeeDays,
                             long[] sequence) {
         // Clamp at the window end: value dates beyond the window cannot be
@@ -402,23 +427,32 @@ public final class LedgerEngine {
             for (LocalDate v : BusinessDates.datesBetween(windowStart, effective)) {
                 String key = account.id() + "|" + v;
                 if (assessedFeeDays.contains(key)) {
-                    continue; // fee already charged for this account-date: idempotent
+                    continue; // decision already made for this account-date: idempotent
                 }
                 Money preFeeBalance = closingBalance(entries, account, v);
                 if (preFeeBalance.isNegative()) {
-                    // Mark only when a fee is actually charged: a date that is
-                    // currently non-negative must be RE-EXAMINED after later
-                    // events arrive (a late back-valued debit can make a past
-                    // date negative). Exactly one fee per account-date is still
-                    // guaranteed by the key.
+                    // Mark only when a fee DECISION is made (charge or
+                    // documented skip): a date that is currently non-negative
+                    // must be RE-EXAMINED after later events arrive (a late
+                    // back-valued debit can make a past date negative).
+                    // Exactly one fee per account-date is guaranteed by the key.
                     assessedFeeDays.add(key);
-                    Money fee = Money.of(OVERDRAFT_FEE_AMOUNT, account.currency()).negate();
+                    Money configuredFee = overdraftFees.get(account.currency());
+                    if (configuredFee == null) {
+                        // No silent cross-currency fee and no silent omission:
+                        // the skip is part of the replay's audit trace.
+                        skippedFees.add(new SkippedFeeAssessment(account.id(), v, processingDate,
+                                preFeeBalance, "NO_FEE_CONFIGURED_FOR_CURRENCY "
+                                + account.currency()));
+                        continue;
+                    }
+                    Money fee = configuredFee.negate();
                     String feeId = "FEE-" + account.id() + "-" + v;
                     appendEntry(entries, sequence, feeId, account.id(), fee, v, processingDate,
                             EntryKind.FEE_OVERDRAFT,
                             "Overdraft fee for " + v + " (balance " + preFeeBalance + ")");
                     feeTrace.add(new FeeAssessment(account.id(), v, processingDate, preFeeBalance,
-                            fee.negate()));
+                            configuredFee));
                 }
             }
         }

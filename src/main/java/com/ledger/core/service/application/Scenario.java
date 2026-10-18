@@ -9,6 +9,7 @@ import com.ledger.core.service.domain.money.Money;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.List;
+import java.util.Map;
 
 /**
  * The exact input event stream from the specification, in processing (stream)
@@ -38,6 +39,17 @@ public final class Scenario {
     public static final LocalDate WINDOW_END = LocalDate.of(2026, 1, 6);
     public static final ZoneId BUSINESS_ZONE = ZoneId.of("UTC");
     public static final int INSTALMENT_COUNT = 3;
+
+    /**
+     * Explicit per-currency overdraft fee schedule. AED 25.00 is the supplied
+     * requirement. BHD 25.000 is an explicit, documented implementation choice
+     * (same numeric value, account currency — AMBIGUITIES.md #15); it is
+     * configuration, not a silent fallback, and a currency absent from this
+     * map is charged NOTHING (the skip is recorded in the replay trace).
+     */
+    public static final Map<CurrencyCode, Money> OVERDRAFT_FEE_SCHEDULE = Map.of(
+            CurrencyCode.AED, Money.of("25.00", CurrencyCode.AED),
+            CurrencyCode.BHD, Money.of("25.000", CurrencyCode.BHD));
 
     private Scenario() {
     }
@@ -83,7 +95,8 @@ public final class Scenario {
     }
 
     public static LedgerEngine engine() {
-        return new LedgerEngine(accounts(), WINDOW_START, WINDOW_END, BUSINESS_ZONE);
+        return new LedgerEngine(accounts(), WINDOW_START, WINDOW_END, BUSINESS_ZONE,
+                OVERDRAFT_FEE_SCHEDULE);
     }
 
     public static ReplayResult replay() {

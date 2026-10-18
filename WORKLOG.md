@@ -207,3 +207,47 @@ policy, interest policy) are preserved — review found no contradiction.
   -Dsurefire.excludedGroups=` -> 1 test, 1 failure (expected, documented);
   `mvn -q compile exec:java` -> report figures unchanged (390.93 / 10.008 / -75.00 /
   0.93 / 0.008).
+
+---
+
+# Phase 3 — correctness review pass
+
+## 2026-10-18 18:26 IST — Baseline
+
+- Repo clean on `main` at `70b0a18`, 10 commits ahead of origin. Baseline:
+  `mvn clean test` -> 62 tests, 0 failures — BUILD SUCCESS.
+
+## 2026-10-18 18:30 IST — Review findings and plan
+
+Reviewed LedgerEngine, domain classes, and tests against the phase-3 task list:
+
+1. Late backdated events (E7): already handled — evening assessment after E7 posts
+   reassesses D2..D5; covered by existing tests. No change needed.
+2. **Overdraft fee policy**: the engine applies a single hardcoded numeric "25" in
+   the ACCOUNT's currency. Although documented (AMBIGUITIES #15), the fee schedule is
+   implicit — a reviewer's "do not silently charge BHD 25.000" point stands: the BHD
+   amount was never an explicit decision point in code. FIX: make the fee an explicit
+   per-currency schedule configured on the engine; AED 25.00 is the supplied
+   requirement, BHD 25.000 becomes an explicit, documented configuration entry;
+   currencies WITHOUT a configured fee produce a visible skipped-assessment record
+   (no silent fee, no silent omission).
+3. Fee idempotency: already keyed by account|valueDate, marked only on an actual
+   decision. No duplicates possible; extend to the new skip path.
+4. Reversal behavior: fixed in phase 2 (validate-then-post); covered by
+   ReversalTest. No change needed.
+5. **Date-boundary logic**: traced the evening-boundary loop for backward-moving
+   processing dates — assessments are not skipped (the final loop always covers
+   windowStart..windowEnd for un-assessed dates) and duplicates are impossible
+   (idempotency key). Adding an explicit regression test: a backward-dated-processing
+   event creating a D1 overdraft is caught at the window-end evening.
+6. Authorization lifecycle: Auth-A residual 15.00 released (documented policy);
+   Auth-B is DECLINED (available -155.00 < 90.00), so "retain hold through Day 6 if
+   approved" does not apply — conditional antecedent is false. Verified by existing
+   tests; adding explicit per-day available-balance assertions.
+7. Interest: policy already sum-of-rounded-dailies, HALF_UP, post-fee bases.
+8. Money precision: BigDecimal everywhere; MoneyTest pins scales.
+
+Plan: (A) explicit per-currency fee schedule + skipped-fee trace + tests;
+(B) per-event E1..E10 regression tests + all-six-days projection test + backward-date
+fee-catch test; (C) docs (AMBIGUITIES #15 rewrite + #27, NUMBERS, README touch-ups,
+WORKLOG); (D) final verification and focused commits.
