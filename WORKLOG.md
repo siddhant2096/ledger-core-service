@@ -851,4 +851,9 @@ Inspected `LedgerEngine.replay`/`reconcileFees` against the four reported issues
 
 ## 2026-10-18 21:20 IST — Final verification
 
-- Pending: full suite, replay, commit of comment corrections.
+- `mvn clean test`: 106 tests, 0 failures — BUILD SUCCESS (includes the new
+  reversal-cascade test).
+- Intentional-failure tag run: 1 test, 1 failure (documented, expected).
+- `mvn -q compile exec:java`: figures unchanged (466.03 / 1.03 / 10.008 / 0.008).
+- Committed as 06a8bf9 (new test) and b5fc35e (comment corrections + README count
+  105 -> 106 + this worklog).
