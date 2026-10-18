@@ -124,17 +124,23 @@ public final class LedgerEngine {
     }
 
     public ReplayResult replay(List<EventEnvelope> stream) {
-        // Data-pipeline contract: stream positions must be unique — they key
-        // outcomes and make ordering explicit. Violations are programming
-        // errors, not business rejections.
-        Set<Long> positions = new HashSet<>();
+        // Data-pipeline contract: stream positions must STRICTLY INCREASE along
+        // the list — they key outcomes and make the supplied processing order
+        // explicit. A non-increasing position (duplicate or out-of-order)
+        // contradicts the list order it claims to describe; the engine rejects
+        // the stream rather than silently sorting it. Violations are
+        // programming errors, not business rejections.
+        long previousPosition = 0;
         for (EventEnvelope envelope : stream) {
-            if (!positions.add(envelope.streamPosition())) {
-                throw new IllegalArgumentException(
-                        "duplicate streamPosition " + envelope.streamPosition());
+            if (envelope.streamPosition() <= previousPosition) {
+                throw new IllegalArgumentException("streamPosition must strictly increase "
+                        + "in stream order: position " + envelope.streamPosition()
+                        + " follows " + previousPosition);
             }
+            previousPosition = envelope.streamPosition();
         }
 
+        // (Strictly increasing positions subsume uniqueness.)
         EventLog log = new EventLog();
         Map<Long, Outcome> outcomes = new LinkedHashMap<>();
         List<LedgerEntry> entries = new ArrayList<>();

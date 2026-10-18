@@ -8,6 +8,7 @@ import com.ledger.core.service.domain.account.Account;
 import com.ledger.core.service.domain.auth.Authorization;
 import com.ledger.core.service.domain.auth.AuthorizationStatus;
 import com.ledger.core.service.domain.entry.EntryKind;
+import com.ledger.core.service.domain.entry.LedgerEntry;
 import com.ledger.core.service.domain.event.EventEnvelope;
 import com.ledger.core.service.domain.event.LedgerEvent;
 import com.ledger.core.service.domain.money.CurrencyCode;
@@ -436,6 +437,109 @@ class BoundaryAndValidationTest {
         assertTrue(((Outcome.Rejected) result.outcomeAt(2)).reason().contains("DUPLICATE_EVENT_ID"));
         assertTrue(((Outcome.Rejected) result.outcomeAt(3)).reason()
                 .contains("EVENT_DATE_OUT_OF_HORIZON"));
+    }
+
+    @Test
+    void settlementReversalCompensatesPostingButAuthorizationStaysTerminal() {
+        // Reversing a SETTLEMENT posting is a financial compensation only:
+        // under the one-capture policy (#6) a settled authorization is
+        // terminal, so the released hold is NOT resurrected and no further
+        // settlement is possible (documented in AMBIGUITIES.md #21).
+        ReplayResult result = run(List.of(AED_ACCOUNT), List.of(
+                env("X1", 1, 1, new LedgerEvent.Credit("A", Money.of("500.00", CurrencyCode.AED))),
+                env("X2", 2, 2, new LedgerEvent.AuthorizationRequest("A", "Auth-X",
+                        Money.of("100.00", CurrencyCode.AED))),
+                env("X3", 3, 3, new LedgerEvent.Settlement("A", "Auth-X",
+                        Money.of("40.00", CurrencyCode.AED))),
+                env("X4", 4, 4, new LedgerEvent.Reversal("A", "X3")),
+                env("X5", 5, 5, new LedgerEvent.Settlement("A", "Auth-X",
+                        Money.of("40.00", CurrencyCode.AED)))));
+        // The settlement reversal is accepted and posts +40.00 valued D4.
+        assertInstanceOf(Outcome.Accepted.class, result.outcomeOf("X4"));
+        LedgerEntry compensation = result.entries().stream()
+                .filter(e -> e.kind() == EntryKind.REVERSAL_COMPENSATION).findFirst().orElseThrow();
+        assertEquals(Money.of("40.00", CurrencyCode.AED), compensation.amount());
+        assertEquals(Scenario.day(4), compensation.valueDate());
+        // Authorization remains terminal; hold is not resurrected.
+        Authorization auth = result.authorizations().get("Auth-X");
+        assertEquals(AuthorizationStatus.PARTIALLY_SETTLED, auth.status());
+        assertEquals(Money.zero(CurrencyCode.AED),
+                LedgerEngine.activeHolds(result.authorizations(), AED_ACCOUNT));
+        // A new settlement after the reversal is still rejected.
+        Outcome x5 = result.outcomeOf("X5");
+        assertInstanceOf(Outcome.Rejected.class, x5);
+        assertTrue(((Outcome.Rejected) x5).reason().contains("AUTHORIZATION_NOT_SETTLEABLE"));
+        // Funds: 500 - 40 + 40 = 500.00 on D4/D5 (before D6 interest).
+        assertEquals(Money.of("500.00", CurrencyCode.AED),
+                LedgerEngine.closingBalance(result.entries(), AED_ACCOUNT, Scenario.day(4)));
+    }
+
+    @Test
+    void rejectedEventStillConsumesItsEventId() {
+        // Documented policy (AMBIGUITIES.md #25): an event id is consumed on
+        // first SIGHT, even when the event is rejected — redelivering the id
+        // with different content is a conflict, not a fresh event.
+        ReplayResult result = run(List.of(AED_ACCOUNT), List.of(
+                env("X1", 1, 1, new LedgerEvent.Credit("A", Money.of("5.000", CurrencyCode.BHD))),
+                env("X1", 2, 2, new LedgerEvent.Credit("A", Money.of("50.00", CurrencyCode.AED)))));
+        assertTrue(((Outcome.Rejected) result.outcomeAt(1)).reason().contains("CURRENCY_MISMATCH"));
+        Outcome second = result.outcomeAt(2);
+        assertInstanceOf(Outcome.Rejected.class, second);
+        assertTrue(((Outcome.Rejected) second).reason().contains("DUPLICATE_EVENT_ID"));
+        // Neither occurrence posted anything.
+        assertTrue(result.entries().isEmpty());
+        assertEquals(Money.zero(CurrencyCode.AED),
+                LedgerEngine.closingBalance(result.entries(), AED_ACCOUNT, Scenario.day(6)));
+    }
+
+    @Test
+    void outOfOrderStreamPositionsAreRejected() {
+        // Positions make the stream order explicit; a sequence that
+        // contradicts the list order (2 before 1) is a data-contract
+        // violation, not a reason to sort. The engine must NOT reorder.
+        List<EventEnvelope> stream = List.of(
+                new EventEnvelope("X1", 2, Scenario.day(1), Scenario.day(1),
+                        new LedgerEvent.Credit("A", Money.of("1.00", CurrencyCode.AED))),
+                new EventEnvelope("X2", 1, Scenario.day(1), Scenario.day(1),
+                        new LedgerEvent.Credit("A", Money.of("1.00", CurrencyCode.AED))));
+        LedgerEngine engine = new LedgerEngine(List.of(AED_ACCOUNT),
+                Scenario.WINDOW_START, Scenario.WINDOW_END, Scenario.BUSINESS_ZONE,
+                Scenario.OVERDRAFT_FEE_SCHEDULE);
+        assertThrows(IllegalArgumentException.class, () -> engine.replay(stream));
+    }
+
+    @Test
+    void emptyStreamProducesNoEntriesNoFeesNoInterestEntries() {
+        ReplayResult result = run(List.of(AED_ACCOUNT), List.of());
+        assertTrue(result.entries().isEmpty());
+        assertTrue(result.feeTrace().isEmpty());
+        assertTrue(result.feeCompensations().isEmpty());
+        assertTrue(result.skippedFees().isEmpty());
+        assertTrue(result.log().events().isEmpty());
+        assertTrue(result.outcomes().isEmpty());
+        // The interest trace still records one (zero) accrual row per date —
+        // deterministic shape — but no capitalization entry is derived.
+        assertEquals(6, result.interestTrace().size());
+        assertTrue(result.interestTrace().stream().allMatch(a -> a.accrual().isZero()));
+    }
+
+    @Test
+    void streamWithOnlyOutOfWindowEventsDerivesNothing() {
+        LocalDate outside = Scenario.WINDOW_END.plusDays(1);
+        ReplayResult result = run(List.of(AED_ACCOUNT), List.of(
+                new EventEnvelope("X0", 1, outside, outside,
+                        new LedgerEvent.Credit("A", Money.of("100.00", CurrencyCode.AED)))));
+        assertInstanceOf(Outcome.Rejected.class, result.outcomeAt(1));
+        assertEquals(1, result.log().size());
+        assertTrue(result.entries().isEmpty());
+        assertTrue(result.feeTrace().isEmpty());
+    }
+
+    @Test
+    void defaultFeeScheduleContainsExactlyTheSpecifiedAedFee() {
+        assertEquals(1, Scenario.OVERDRAFT_FEE_SCHEDULE.size());
+        assertEquals(Money.of("25.00", CurrencyCode.AED),
+                Scenario.OVERDRAFT_FEE_SCHEDULE.get(CurrencyCode.AED));
     }
 
     @Test

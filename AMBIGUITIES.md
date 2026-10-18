@@ -290,6 +290,25 @@ the "sequential fee-assessment balances" terminology in REJECTED.md):
    `LateEventFeeTest` (both directions: charge of an uncharged date, compensation of
    a charged date).
 
+**Consistency of the recomputation (audited in the final review)**: the desired fee
+set is computed so that a compensation CORRECTLY affects later dates' balances and
+eligibility — a fee that is about to be compensated (charged, but its date is no
+longer negative) does not participate in later dates' bases in that recomputation;
+participation follows exactly the fees that will be effective after the boundary.
+This is the intended reading of the sequential semantics of #1 applied to
+reconciliation: the alternative reading (evaluating each date against the
+as-currently-posted fee history before compensation) would let a dying fee justify
+a later fee that then loses its own justification — an inconsistent state the
+recomputation avoids by construction. Circularity note: because fees are a fixed
+amount and participation only ever makes balances MORE negative, the sequential
+recomputation has a unique least fixed point (charge date v iff its base, including
+effective fees of earlier dates, is negative); no iterative solving or iteration
+limits are needed. Enforced by the discriminating regression test
+`FeeReconciliationTest.compensationOfEarlierFeeChangesLaterDatesEligibility`,
+which fails on any implementation that leaks an about-to-be-compensated fee into a
+later date's eligibility (it would retain a fee the test proves must be
+compensated).
+
 ## 12. Which balance is the interest base?
 
 1. **Ambiguity**: pre-fee or post-fee closing balance?
@@ -509,11 +528,19 @@ assumption explicit but cannot eliminate it.
    carries a single value date and the sum is exactly conserved either way; one entry
    keeps the books cleaner.
 5. **Consequence**: E9 (targeting E7, a simple DEBIT) compensates exactly −620.00 →
-   +620.00; reversing E10 would compensate exactly −10.000 BHD.
+   +620.00; reversing E10 would compensate exactly −10.000 BHD. **Settlement
+   reversal**: reversing a settlement's POSTING entry is allowed and compensates
+   the funds (+amount), but under the one-capture policy (#6) the authorization
+   remains terminal (PARTIALLY/FULLY_SETTLED) and the released hold is NOT
+   resurrected — the reversal restores money, not capturability. (Alternative:
+   re-open the hold on settlement reversal, as some card systems do for refunds —
+   rejected here because it contradicts the documented terminal-settlement
+   lifecycle; a real refund flow would be a separate explicit event type.)
 6. **Test**: `ReversalTest` (all eight cases), including
    `multiEntryInstalmentCreditIsReversedInFullAsOneCompensation`,
    `reversalOfAReversalIsRejected`, `reversingDerivedFeeEntriesIsUnsupported`,
-   `crossAccountReversalIsRejected`.
+   `crossAccountReversalIsRejected`; settlement-reversal policy pinned by
+   `BoundaryAndValidationTest.settlementReversalCompensatesPostingButAuthorizationStaysTerminal`.
 
 ## 22. When is reversal state mutated? (ordering of validation vs state update)
 
@@ -578,17 +605,31 @@ assumption explicit but cannot eliminate it.
 2. **Chosen policy**: the first occurrence is processed normally; subsequent
    envelopes with the same id are REJECTED with `DUPLICATE_EVENT_ID` (no entries, no
    state change). Outcomes are keyed by `streamPosition` so both outcomes survive.
-   Duplicate `streamPosition` values are a data-contract violation and fail fast
-   (`IllegalArgumentException`) — positions are the pipeline's ordering key.
+   Two sharpenings from the final review:
+   - **A rejected first occurrence still consumes its id.** Ids are consumed on
+     first SIGHT, not on acceptance: redelivering an id with different content is a
+     data conflict, and silently reprocessing it would break exactly-once semantics.
+   - **Positions must STRICTLY INCREASE along the list** (uniqueness alone did not
+     enforce order). A non-increasing position contradicts the list order it claims
+     to describe, so the engine fails fast with `IllegalArgumentException` rather
+     than silently sorting (the spec mandates the supplied order; sorting is not
+     permitted).
 3. **Why**: real feeds redeliver; idempotent ingestion requires exactly-once effect.
    Silently double-posting would corrupt balances; silently overwriting the first
    outcome would corrupt the audit trail.
-4. **Alternative**: reject the whole stream on any duplicate — too coarse; the
-   duplicate is the anomaly, not the stream.
+4. **Alternatives**: (a) consume ids only on acceptance — rejected; a rejected event
+   is still a seen fact and re-using its id must surface as a conflict; (b) reject
+   the whole stream on any duplicate — too coarse; the duplicate is the anomaly,
+   not the stream; (c) sort envelopes by position — not permitted (stream order is
+   authoritative).
 5. **Consequence**: replays of the same logical event are safe; redelivered events
-   are visible as rejections in the report.
+   are visible as rejections in the report; malformed position sequences fail fast
+   at the pipeline boundary.
 6. **Test**: `BoundaryAndValidationTest.duplicateEventIdIsRejectedAndKeepsBothOutcomes`,
-   `duplicateStreamPositionIsADataContractViolation`.
+   `duplicateEventIdCannotAffectEntriesAuthFeesOrInterest`,
+   `rejectedEventStillConsumesItsEventId`,
+   `duplicateStreamPositionIsADataContractViolation`,
+   `outOfOrderStreamPositionsAreRejected`.
 
 ## 26. Can Credit/Debit carry a zero or negative amount?
 

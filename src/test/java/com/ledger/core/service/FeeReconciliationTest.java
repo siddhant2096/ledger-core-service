@@ -155,6 +155,50 @@ class FeeReconciliationTest {
     }
 
     // ---------------------------------------------------------------
+    // Test A': the sharp discriminating case for compensation-aware
+    // eligibility. X1 -10@D1, X2 +10@D2, X3 +15@D1 (proc D3, LATE).
+    //
+    // Before X3: D1 = -10 -> F1 charged (D1 evening); D2 = -10 -25 +10 =
+    // -25 -> F2 charged (D2 evening, preFee -25.00).
+    // After X3 (D1 non-fee = +5.00): F1 unjustified -> compensated.
+    // F2's eligibility MUST be re-evaluated WITHOUT F1's about-to-be-
+    // compensated fee: correct base = 5 + 10 = +15.00 -> F2 compensated.
+    // An implementation leaking F1 into D2's base would compute
+    // 5 - 25 + 10 = -10.00 and wrongly RETAIN F2. This test fails on such
+    // an implementation.
+    // ---------------------------------------------------------------
+    @Test
+    void compensationOfEarlierFeeChangesLaterDatesEligibility() {
+        ReplayResult result = run(List.of(
+                env(1, "X1", 1, 1, new LedgerEvent.Debit("A", aed("10.00"))),
+                env(2, "X2", 2, 2, new LedgerEvent.Credit("A", aed("10.00"))),
+                env(3, "X3", 3, 1, new LedgerEvent.Credit("A", aed("15.00")))));
+
+        List<LedgerEntry> fees = entriesOfKind(result, EntryKind.FEE_OVERDRAFT);
+        assertEquals(2, fees.size());
+        assertEquals(aed("-10.00"), result.feeTrace().get(0).preFeeBalance());
+        assertEquals(Scenario.day(1), result.feeTrace().get(0).assessedOnDate());
+        assertEquals(aed("-25.00"), result.feeTrace().get(1).preFeeBalance()); // -10 -25 +10
+        assertEquals(Scenario.day(2), result.feeTrace().get(1).assessedOnDate());
+
+        // Both fees compensated on the D3 evening — F2's compensation is the
+        // proof that F1's compensation flowed into D2's eligibility.
+        List<LedgerEntry> compensations = entriesOfKind(result, EntryKind.FEE_REVERSAL);
+        assertEquals(2, compensations.size());
+        assertEquals(List.of(Scenario.day(1), Scenario.day(2)),
+                compensations.stream().map(LedgerEntry::valueDate).toList());
+        assertTrue(compensations.stream()
+                .allMatch(e -> e.derivedOnDate().equals(Scenario.day(3))));
+
+        assertEquals(aed("5.00"), closing(result, 1));   // -10 -25 +25 +15
+        assertEquals(aed("15.00"), closing(result, 2));  // 5 + 10 - 25 + 25
+        assertEquals(aed("15.00"), closing(result, 5));
+        // Interest: D1 0.00 (0.0020 -> 0.00), D2..D6 15 x .0004 = .006 -> 0.01
+        // each -> 0.05 capitalized once.
+        assertEquals(aed("15.05"), closing(result, 6));
+    }
+
+    // ---------------------------------------------------------------
     // Test C: regression for the boundary-poisoning defect. An
     // out-of-window event (processing D7 > window end) arrives FIRST.
     // It must be logged and rejected with exactly one outcome, and must

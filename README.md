@@ -17,7 +17,7 @@ The event stream is replayable from scratch and every replay is byte-identical.
 ## Commands
 
 ```bash
-# Run the normal test suite (94 tests; the deliberately failing test is excluded)
+# Run the normal test suite (101 tests; the deliberately failing test is excluded)
 mvn test
 
 # Replay the full event stream and print the six-day report

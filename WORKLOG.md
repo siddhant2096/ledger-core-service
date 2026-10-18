@@ -709,3 +709,47 @@ Inspected `LedgerEngine.replay`/`reconcileFees` against the four reported issues
 - Intentional-failure tag run: 1 test, 1 failure (documented, expected).
 - Replay: figures unchanged (466.03 / 1.03 / 10.008 / 0.008) — the fix only
   affects the defective out-of-window path. README test count 87 -> 94.
+
+---
+
+# Phase 10 — reconcileFees audit and stream-contract hardening
+
+## 2026-10-18 20:46 IST — Audit (code read from disk, not memory)
+
+- Re-read `reconcileFees` in full. Verdict on the reported primary defect: the
+  claim "pass 1 may include fee effects that are about to be compensated" does NOT
+  reproduce. Pass 1 participation is keyed on `desired` membership (dates negative
+  in THIS pass); an about-to-be-compensated fee belongs to a date that is NOT
+  negative in the recomputation, hence not desired, hence non-participating.
+  Charged-and-compensated dates are explicitly excluded from participation, so
+  decision bases equal the post-reconciliation effective books. No reorder of
+  passes was needed or made.
+- PROOF instead of assertion: added the sharp discriminating test
+  `compensationOfEarlierFeeChangesLaterDatesEligibility` (D1 -10 -> F1; D2
+  -25 -> F2; late +15@D1 -> F1 compensated; correct D2 base = +15.00 -> F2
+  compensated; a leaking implementation would compute -10.00 and retain F2).
+  PASSES on the current engine — would fail on the defective variant described in
+  the review.
+- Genuine gap found by the review: `streamPosition` uniqueness was enforced but
+  ORDER was not — a [2, 1] position sequence was silently accepted, contradicting
+  the explicit-ordering contract. New `outOfOrderStreamPositionsAreRejected`
+  FAILED on the existing code (as designed), then the engine was changed to require
+  strictly increasing positions (fail-fast IllegalArgumentException; never sorts).
+- Also pinned by new tests after verifying the code: settlement reversal
+  compensates funds but leaves the authorization terminal and the hold released
+  (documented policy consequence, #21); a rejected first occurrence still consumes
+  its event id (#25, documented explicitly now); empty stream and
+  only-out-of-window streams derive nothing but still produce well-formed traces;
+  default fee schedule contains exactly AED 25.00.
+- One compile slip during test authoring (missing LedgerEntry import in
+  BoundaryAndValidationTest) — fixed immediately, recorded honestly.
+
+## 2026-10-18 21:00 IST — Verification
+
+- `mvn clean test`: 101 tests, 0 failures — BUILD SUCCESS.
+- Intentional-failure tag run: 1 test, 1 failure (documented, expected).
+- `mvn -q compile exec:java`: figures unchanged (466.03 / 1.03 / 10.008 / 0.008).
+- Docs: AMBIGUITIES.md #11 (compensation-aware recomputation + fixed-point note +
+  discriminating test reference), #21 (settlement-reversal consequence), #25
+  (strictly increasing positions; rejected events consume ids); README test count
+  94 -> 101.
