@@ -199,6 +199,64 @@ class FeeReconciliationTest {
     }
 
     // ---------------------------------------------------------------
+    // Test A'': cascade through a REVERSAL event, with numbers chosen to
+    // FLIP the outcome depending on algorithm correctness.
+    //
+    // X1 -10@D1 -> F1 charged on the D1 evening (preFee -10.00).
+    // X2 +10@D2 -> D2 evening: D2 = -10 -25(F1) +10 = -25.00 -> F2 charged
+    //   (preFee -25.00, derivedOn D2). NOTE: without F1, D2 would be 0.00 —
+    //   F2's ONLY justification is F1's fee.
+    // X3 REVERSAL of X1 (proc D3, value D1) -> +10.00 compensation @D1.
+    //   D3 evening: D1 = 0.00 -> F1 compensated.
+    //   D2 MUST then be evaluated WITHOUT F1: correct base = 0 + 10 =
+    //   +10.00 -> F2 compensated. An implementation leaking the
+    //   about-to-be-compensated F1 would compute 0 - 25 + 10 = -15.00 and
+    //   wrongly RETAIN F2 — this test fails on such an implementation.
+    //
+    // Independent calculation (no effective fees remain): D1 = -10 +10 =
+    // 0.00; D2 = 0 + 10 = 10.00; D3..D6 = 10.00. Interest: 10 x 0.0004 =
+    // 0.0040 -> HALF_UP 0.00 at AED scale -> no capitalization entry.
+    // ---------------------------------------------------------------
+    @Test
+    void reversalCompensationCascadesToDependentFeeEligibility() {
+        ReplayResult result = run(List.of(
+                env(1, "X1", 1, 1, new LedgerEvent.Debit("A", aed("10.00"))),
+                env(2, "X2", 2, 2, new LedgerEvent.Credit("A", aed("10.00"))),
+                env(3, "X3", 3, 1, new LedgerEvent.Reversal("A", "X1"))));
+
+        // The reversal posted its own compensation valued on D1.
+        LedgerEntry reversal = result.entries().stream()
+                .filter(e -> e.kind() == EntryKind.REVERSAL_COMPENSATION).findFirst().orElseThrow();
+        assertEquals(aed("10.00"), reversal.amount());
+        assertEquals(Scenario.day(1), reversal.valueDate());
+        assertEquals(Scenario.day(3), reversal.derivedOnDate());
+
+        // Two charges, both correct given the books as then known.
+        assertEquals(2, entriesOfKind(result, EntryKind.FEE_OVERDRAFT).size());
+        assertEquals(aed("-10.00"), result.feeTrace().get(0).preFeeBalance());
+        assertEquals(Scenario.day(1), result.feeTrace().get(0).assessedOnDate());
+        assertEquals(aed("-25.00"), result.feeTrace().get(1).preFeeBalance()); // -10 -25 +10
+        assertEquals(Scenario.day(2), result.feeTrace().get(1).assessedOnDate());
+
+        // Both compensated on the D3 evening; F2's compensation is the proof
+        // that F1's compensation flowed into D2's eligibility.
+        List<LedgerEntry> compensations = entriesOfKind(result, EntryKind.FEE_REVERSAL);
+        assertEquals(2, compensations.size());
+        assertEquals(List.of(Scenario.day(1), Scenario.day(2)),
+                compensations.stream().map(LedgerEntry::valueDate).toList());
+        assertTrue(compensations.stream()
+                .allMatch(e -> e.derivedOnDate().equals(Scenario.day(3))));
+
+        // Final balances match the independent no-effective-fees calculation.
+        assertEquals(aed("0.00"), closing(result, 1));
+        assertEquals(aed("10.00"), closing(result, 2));
+        assertEquals(aed("10.00"), closing(result, 5));
+        // 10.00 x 0.0004 = 0.0040 -> rounds to 0.00 at AED scale: no interest.
+        assertEquals(0, entriesOfKind(result, EntryKind.INTEREST_CAPITALIZATION).size());
+        assertEquals(aed("10.00"), closing(result, 6));
+    }
+
+    // ---------------------------------------------------------------
     // Test B': the exact review scenario — a date goes negative, is
     // charged, is COMPENSATED AFTER A REVERSAL EVENT, and later becomes
     // negative again due to another valid event.
