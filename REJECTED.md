@@ -5,8 +5,20 @@ Each criterion is evaluated independently against the documented model
 QUALIFICATION**. Reference figures (derived in NUMBERS.md and verified by the test
 suite):
 
-- End-of-Day-5 pre-fee value-date closings, ACC-001: D1 250.00, D2 −370.00,
-  D3 5.00, D4 −180.00, D5 −205.00.
+- **Sequential fee-assessment balances (before each date's own fee)**, ACC-001, as
+  computed on the evening of Day 5: D1 250.00, D2 −370.00, D3 5.00, D4 −180.00,
+  D5 −205.00. The assessment walks value dates in ascending order and each balance
+  INCLUDES the fees assessed moments earlier for prior dates (AMBIGUITIES.md #1):
+  D3 = −370.00 − 25.00(D2 fee) + 400.00 = 5.00; D4 = 5.00 − 185.00 = −180.00;
+  D5 = −180.00 − 25.00(D4 fee) = −205.00. Confirmed against the implementation's
+  fee trace (`ReplayTest.exactlyOneFeePerNegativeAccountDayWithAssessedDayValueDate`
+  asserts the pre-fee balances −370.00 / −180.00 / −205.00 for value dates 2/4/5).
+- Distinct from the above: the **balances before the entire fee-assessment batch**
+  (no fees posted anywhere yet): D1 250.00, D2 −370.00, D3 30.00, D4 −155.00,
+  D5 −155.00 (D3 = −370.00 + 400.00; D4 = 30.00 − 185.00; D5 = −155.00). The two
+  series answer different questions — "is this date negative when assessed in
+  sequence?" versus "what were the books before any fee existed?" — and this
+  document never calls either of them just "pre-fee" without saying which.
 - Final (post-fee, post-reversal) closings, ACC-001: D1 250.00, D2 225.00,
   D3 625.00, D4 415.00, D5 390.00, D6 390.93.
 - Fees: 3 × AED 25.00, valued on Days 2, 4, 5; all derived on processing Day 5.
@@ -35,39 +47,65 @@ compensation and the −25.00 fee, both valued Day 2).
 (fee trace records preFeeBalance −370.00 for value day 2, assessed on day 5) and the
 report's FEE ASSESSMENT TRACE.
 
-## Criterion 2 — REJECTED (incorrect arithmetic, not a policy dispute)
+## Criterion 2 — REJECTED (under the documented policy; arithmetic below)
 
 > "E7 causes exactly one overdraft fee to be assessed, on Day 2."
 
-**Arithmetic.** E7 makes Day 2 negative (−370.00 → fee F1). But the negativity
-propagates forward regardless of whether fees participate in later bases:
+**Verdict under the documented policy.** Under the documented policy of assessing a
+fee for each negative account-day (AMBIGUITIES.md #1, #2, #11), the event history
+results in fees valued on Days 2, 4, and 5 — three fees, not one. The outcome is
+determined by the fee schedule and the assessment timing, so this rejection is
+tied to that documented policy rather than to a claim about every conceivable model.
 
-- Day 3 pre-fee (fee-participating model): −370.00 − 25.00 + 400.00 = **+5.00** → no fee.
-- Day 4 pre-fee: 5.00 − 185.00 = **−180.00** → fee F2.
-- Day 5 pre-fee: −180.00 − 25.00 = **−205.00** → fee F3.
+**Arithmetic (sequential fee-assessment balances, evening of Day 5).** E7 makes
+Day 2 negative: 250.00 − 620.00 = −370.00 → fee F1 (valued Day 2). The assessment
+then walks forward with previously assessed fees included:
 
-Even under the alternative model where fees are excluded from subsequent bases, Day 4
-is 250.00 − 620.00 + 400.00 − 185.00 = −155.00 → still negative, still a fee. So
-"exactly one fee" fails under every reasonable model: E7 causes **three** fees (value
-days 2, 4, 5), totalling AED 75.00. The "on Day 2" part is correct for the first fee
-only. This is incorrect arithmetic in the criterion, not an underspecified rule.
+- Day 3: −370.00 − 25.00 + 400.00 = **+5.00** → no fee.
+- Day 4: 5.00 − 185.00 = **−180.00** → fee F2.
+- Day 5: −180.00 − 25.00 = **−205.00** → fee F3.
 
-**Assumption stated**: fees are assessed on the evening of processing Day 5, once per
-negative account-day, and persist.
+Even if previously assessed fees were EXCLUDED from later dates' bases (the
+alternative reading considered in AMBIGUITIES.md #1), Day 4 would be
+250.00 − 620.00 + 400.00 − 185.00 = −155.00 → still negative, still charged, so the
+"exactly one fee" claim fails under both participation readings of the documented
+policy. A model in which only Day 2 is ever charged (e.g. the lagged/targeted
+reassessment variant discussed in the 440.00 section below) would make the
+criterion true, but that model contradicts the fee rule's plain text ("when that
+day's closing ledger balance is negative") and the requirement to examine all
+relevant value dates; it was not chosen. Total under the documented policy:
+3 × AED 25.00 = AED 75.00.
 
-**Enforced by**: `ReplayTest.exactlyOneFeePerNegativeAccountDayWithAssessedDayValueDate`
-(asserts exactly 3 fees with value days 2/4/5 and pre-fee balances
-−370.00/−180.00/−205.00).
+**Verified against code and tests**: the replay produces exactly three
+`FEE_OVERDRAFT` entries with value dates 2/4/5, all derived on the evening of
+processing Day 5, with sequential pre-fee balances −370.00 / −180.00 / −205.00
+(`ReplayTest.exactlyOneFeePerNegativeAccountDayWithAssessedDayValueDate`;
+report FEE ASSESSMENT TRACE).
 
 ## Criterion 3 — ACCEPTED
 
 > "The Day 4 settlement of Auth-A must be accepted."
 
-**State-transition reasoning.** E3 (Day 2): Auth-A approved — ledger 250.00, active
-holds 0.00, available after hold 50.00 ≥ 0. E5 (Day 4): authorization exists, status
-APPROVED (settleable), amount 185.00 > 0, 185.00 ≤ 200.00 (hold) → accepted. Posts
-−185.00 valued Day 4; authorization → PARTIALLY_SETTLED; hold released (residual
-15.00 released).
+**State-transition reasoning.** At the original authorization decision (E3,
+processing Day 2), the figures actually known were:
+
+- Ledger balance before authorization: **AED 250.00** (E1 +1200.00, E2 −950.00)
+- Active holds before authorization: AED 0.00
+- Requested hold: **AED 200.00**
+- Available balance after applying the hold: 250.00 − 200.00 = **AED 50.00 ≥ 0**
+- Decision: **APPROVED**
+
+(These are the figures the engine printed in the decision note: "AUTH APPROVED:
+ledger=AED 250.00 activeHolds=AED 0.00 requested=AED 200.00".) The AED 225.00
+Day-2 ledger balance and AED 25.00 Day-2 available balance that appear elsewhere in
+the report are a **later projected view**: they incorporate E7, E9, and the Day-2
+fee of 25.00, none of which existed when Auth-A was approved. They describe how
+Day 2 looks in the end-of-window projection, not what was knowable at approval
+time, and are never used for the approval decision.
+
+E5 (Day 4): authorization exists, status APPROVED (settleable), amount 185.00 > 0,
+185.00 ≤ 200.00 (hold) → accepted. Posts −185.00 valued Day 4; authorization →
+PARTIALLY_SETTLED; hold released (residual 15.00 released).
 
 **Assumption stated**: settlement validity derives from the authorization, not the
 account balance at settlement time (AMBIGUITIES.md #5–#7); that policy is what makes
@@ -98,35 +136,51 @@ matches that defensible policy.
 > "If Auth-B is approved, its hold reduces available balance but not ledger balance."
 
 **Qualification**: the conditional's antecedent is FALSE in this stream. When E8 is
-processed (Day 5, after E7), the known ledger balance is 1200.00 − 950.00 + 400.00 −
-185.00 − 620.00 = −155.00; −155.00 − 90.00 < 0 → Auth-B is **DECLINED** and creates
-no hold. The mechanism the criterion describes is nonetheless exactly the implemented
-semantics, demonstrated by Auth-A: its approved 200.00 hold makes Day-2 available
-25.00 (= 225.00 − 200.00) while the ledger balance is untouched by the hold. The
-report's Day-5 section prints the decline with its exact inputs.
+processed (Day 5, after E7), the ledger balance **known at that processing point** is
+1200.00 − 950.00 + 400.00 − 185.00 − 620.00 = **−155.00**; −155.00 − 90.00 < 0 →
+Auth-B is **DECLINED** and creates no hold. (Verified against the implementation and
+pinned by test; the report's Day-5 section prints the decline with these exact
+inputs.) The mechanism the criterion describes is nonetheless exactly the implemented
+semantics: an approved hold reduces available balance only. Two views of Auth-A
+demonstrate this without conflating timelines:
+
+- **At approval time (Day 2, processing-time view)**: ledger 250.00, hold 200.00 →
+  available 50.00; the ledger balance is untouched by the hold.
+- **End-of-window projection view**: the report's Day-2 line shows ledger 225.00
+  and available 25.00 (= 225.00 − 200.00). This is a *later projected* Day-2 figure
+  that includes the Day-2 fee discovered on Day 5 — it is not what was known when
+  the hold was approved.
 
 **Enforced by**: `ReplayTest.authBIsDeclinedBecauseTheAccountWasOverdrawnAtProcessingTime`
 and the Day-2 available-balance line in `ReportTest`.
 
-## Criterion 6 — REJECTED (policy-dependent; the claim overreaches)
+## Criterion 6 — REJECTED (under the documented immutable-fee policy)
 
 > "After E9, all balances and fees return to their pre-E7 values."
 
-**Arithmetic and reasoning.** E9 compensates E7 exactly: the *pre-fee* value-date
-balances do return to pre-E7 values (Day-2 pre-fee = +250.00 again). But the fees
-assessed on the evening of Day 5 (3 × 25.00, value days 2/4/5) are immutable derived
-entries under the chosen policy (AMBIGUITIES.md #10) and are NOT removed by E9.
-Therefore post-fee balances do NOT return: Day-2 final = 225.00 ≠ 250.00, and
-cumulative fees are 75.00 ≠ 0.00. Interest bases change too (Day-2 base 225.00, not
-250.00).
+**Arithmetic and reasoning.** E9 reverses E7's debit by exact compensation
+(+620.00 valued Day 2, matching E7's −620.00 valued Day 2; neither entry is ever
+mutated or deleted). Consequently the *pre-fee* value-date balances DO return to
+their pre-E7 values — Day-2 pre-fee is +250.00 again. But the fees already booked
+on the evening of Day 5 (3 × 25.00, value dates 2/4/5) remain as ledger entries
+under the documented policy (AMBIGUITIES.md #10) and are not removed by E9. So
+*post-fee* balances do NOT return: Day-2 final = 225.00 ≠ 250.00, cumulative fees =
+75.00 ≠ 0.00, and interest bases shift accordingly (Day-2 base 225.00, not 250.00).
+The criterion is rejected because it claims BOTH balances and fees return; under the
+documented policy only the pre-fee balances do.
 
-**This is an underspecified business rule, not bad arithmetic in the criterion**:
-under the alternative "full recompute" fee policy, E9 would erase the fee cause and
-the criterion would hold. We rejected that alternative because retroactively erasing
-assessed charges destroys audit history and couples fee income to event arrival
-order; refunds should be explicit events. The criterion is rejected *because* of its
-consequences under sound accounting, not because it conflicts with an arbitrary
-implementation choice.
+**Policy status stated plainly**: fee immutability is a deliberate business-policy
+and auditability choice — an assessed charge is a customer-visible fact, and
+correcting one requires a new explicit compensating entry (e.g. a fee-refund event),
+never a retroactive erasure. It is NOT the only accounting approach that could be
+considered sound: a full-recompute policy would also be defensible, and under it the
+outcome would depend on the chosen fee policy and on whether previously assessed
+charges are reversed via compensating entries or recalculated from scratch. Under
+pure recalculation with this stream, E9 removes the cause of every fee (no final
+closing is negative), so all three fees would vanish and the criterion would hold —
+which is precisely why this criterion is policy-dependent rather than arithmetically
+wrong. We chose immutability for auditability; the trade-off is documented in
+AMBIGUITIES.md #10 and the abandoned-approaches section below.
 
 **Enforced by**: `ReplayTest.e9DoesNotRemoveAssessedFees`.
 
@@ -149,18 +203,24 @@ with double-entry conservation.
 > "If the rounded daily interest accruals do not sum to the capitalized total, the
 > remainder is discarded."
 
-**Reasoning.** Discarding a remainder destroys money silently — unacceptable in an
-accounting core and explicitly forbidden by the spec ("do not discard a rounding
-remainder"). The chosen policy eliminates the discrepancy class entirely: the
-capitalized total is **defined as** the exact sum of the rounded daily accruals, so
-the invariant Σ daily == capitalized holds by construction (ACC-001: 0.10 + 0.09 +
-0.25 + 0.17 + 0.16 + 0.16 = 0.93; ACC-002: 0.004 + 0.004 = 0.008).
+**Reasoning.** The assignment explicitly prohibits this: "Do not discard a rounding
+remainder." That specification requirement alone settles the criterion. Supporting
+reasoning: discarding a remainder silently destroys money, which violates the
+conservation principle any accounting core must satisfy — every minor unit must be
+accounted for.
 
-**The discrepancy is real under the alternative**: rounding the aggregate gives
-2295.00 × 0.0004 = 0.918 → 0.92 ≠ 0.93. Had we chosen aggregate-rounding, the 0.01
-residual would have been allocated deterministically to the final day's accrual —
-never discarded. This criterion is rejected on accounting principle (conservation),
-independent of which reconciliation policy is in force.
+**Arithmetic (unchanged).** The daily AED accruals (each rounded HALF_UP to 2dp)
+are 0.10 + 0.09 + 0.25 + 0.17 + 0.16 + 0.16 = **0.93**, and the capitalized total is
+defined as exactly that sum, so no remainder ever arises under the chosen policy.
+The discrepancy is real under the alternative aggregate-rounding approach: the sum
+of the daily bases is 250.00 + 225.00 + 625.00 + 415.00 + 390.00 + 390.00 =
+2295.00, and 2295.00 × 0.0004 = 0.918 → rounded **0.92** ≠ 0.93 — a difference of
+**AED 0.01** that must not be silently discarded under the specification.
+Aggregate-rounding is not inherently invalid: it would need an explicit,
+deterministic reconciliation policy (e.g. allocating the 0.01 residual to the final
+day's accrual). The sum-of-rounded-dailies policy was chosen because it makes the
+identity exact by construction and keeps each daily statement line equal to what was
+capitalized for it (AMBIGUITIES.md #13).
 
 **Enforced by**: `ReplayTest.capitalizedInterestEqualsSumOfRoundedDailyAccrualsExactly`.
 
@@ -178,8 +238,9 @@ policy preference:
 
 The 440.00 figure implies exactly one fee (D2). But the fee rule is "assess once per
 account per day when that day's closing ledger balance is negative", and on the
-evening of processing Day 5 (after E7 posted, before E9 existed) the pre-fee
-closings were:
+evening of processing Day 5 (after E7 posted, before E9 existed) the sequential
+fee-assessment balances (each before its own fee, after earlier fees — see the
+terminology note at the top of this document) were:
 
 - D2: 250.00 − 620.00 = **−370.00** → fee (this is the D2 fee, value date D2)
 - D3: −370.00 − 25.00 + 400.00 = +5.00 → no fee
@@ -222,32 +283,48 @@ above on the same arithmetic.
 
 ## Approaches considered and abandoned during development
 
-(Only approaches actually evaluated while building this codebase; see WORKLOG.md for
-when.)
+Honesty note on evidence: items 1 and 2 were actually implemented/hit and are
+recorded with their failures in WORKLOG.md (2026-10-18 15:13 and 15:00 entries).
+Items 3–6 were considered at design time and documented as alternatives in
+AMBIGUITIES.md, but were never implemented; the criterion-6 and criterion-8 analyses
+above contain the arithmetic on which 3 and 5 were rejected. Nothing here is a
+fabricated experiment.
 
 1. **Grouping events by processing day instead of honoring stream order.**
-   Implemented first; abandoned when
-   `ReplayTest.allTenEventsAreInTheLogInStreamOrder` failed — grouping applied E10
-   (Day 5) before E9 (stream position 9), violating the mandated "precise processing
-   order". Replaced by stream-order processing with evening assessments triggered on
-   processing-day advancement. (AMBIGUITIES.md #20.)
+   This specific implementation was abandoned because it violated the required
+   stream order: grouping by processing day applied E10 (processing Day 5) ahead of
+   E9 (stream position 9, processing Day 6), and
+   `ReplayTest.allTenEventsAreInTheLogInStreamOrder` caught the reordering
+   (WORKLOG.md, 15:13 entry). Grouping per se is not invalid — a correct
+   implementation could group while preserving stream order within and across
+   groups — but it added an ordering layer whose only effect was the defect.
+   Replaced by stream-order processing with evening assessments triggered on
+   processing-date advancement. (AMBIGUITIES.md #20.)
 2. **Marking account-days as fee-assessed even when no fee was charged.**
-   Caught by code review before the first successful run: it would have made the
-   Day-2 fee impossible to assess when E7 arrived on Day 5. Replaced by marking only
-   days where a fee is actually charged, with re-examination of the others.
-   (AMBIGUITIES.md #11.)
+   Caught by code review before the first successful run (WORKLOG.md, 15:00 entry):
+   it would have made the Day-2 fee impossible to assess when E7 arrived on Day 5.
+   Replaced by marking only days where a fee decision is actually made, with
+   re-examination of the others. (AMBIGUITIES.md #11.)
 3. **Full-recompute fee projection (fees as a pure function of the final stream).**
-   Evaluated while deciding criterion 6; abandoned because it retroactively erases
-   customer-visible charges and makes fee income depend on event arrival order.
-   Replaced by point-in-time assessment + persistence. (AMBIGUITIES.md #10.)
-4. **Clipping excess settlements to the hold amount.** Evaluated for settlement
-   validation; abandoned because silently changing the merchant's amount hides
-   discrepancies. Replaced by full rejection. (AMBIGUITIES.md #7.)
+   Considered at design time and analyzed arithmetically in the criterion-6
+   evaluation above; never implemented. Under the CHOSEN policy, assessed fees are
+   immutable derived entries: correcting an assessed charge would require a new,
+   explicit compensating entry (e.g. a fee-refund event), never a recalculation that
+   erases it. Full recompute remains a defensible alternative whose outcome depends
+   on the fee policy in force and on whether prior charges are reversed via
+   compensation or recalculated; it was not chosen because retroactively changing
+   customer-visible charges weakens the audit trail and couples fee income to event
+   arrival order. (AMBIGUITIES.md #10.)
+4. **Clipping excess settlements to the hold amount.** Considered at design time as
+   an alternative (documented in AMBIGUITIES.md #7); rejected without implementation
+   because silently changing the merchant's amount hides discrepancies. Replaced by
+   full rejection of excess settlements.
 5. **Rounding the aggregate interest and allocating the residual to the last day.**
-   Evaluated for criterion 8; abandoned in favor of sum-of-rounded-dailies, which
-   makes the reconciliation identity exact by construction and keeps daily statement
-   lines equal to what was capitalized for them. (AMBIGUITIES.md #13.)
-6. **Value-date-effective authorization holds.** Evaluated; abandoned because holds
-   are operational reservations of current spending power and back-valued holds would
-   destabilize past approval decisions. Replaced by processing-time holds.
-   (AMBIGUITIES.md #4.)
+   Evaluated arithmetically when deciding criterion 8 (the 0.918 → 0.92 vs 0.93
+   computation above); abandoned in favor of sum-of-rounded-dailies, which makes the
+   reconciliation identity exact by construction and keeps daily statement lines
+   equal to what was capitalized for them. (AMBIGUITIES.md #13.)
+6. **Value-date-effective authorization holds.** Considered at design time
+   (documented in AMBIGUITIES.md #4); rejected without implementation because holds
+   are operational reservations of current spending power and back-valued holds
+   would destabilize past approval decisions. Replaced by processing-time holds.

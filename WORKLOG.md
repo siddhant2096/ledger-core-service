@@ -363,3 +363,64 @@ WORKLOG); (D) final verification and focused commits.
   the documented message; `mvn -q compile exec:java` -> report inspected, figures
   unchanged (390.93 / 10.008 / fees 3x25.00 discovered 2026-01-05 / interest 0.93 /
   0.008).
+
+---
+
+# Phase 5 — REJECTED.md revision (documentation only)
+
+## 2026-10-18 19:15 IST — Inspection and verification before editing
+
+- Re-read REJECTED.md, AMBIGUITIES.md (#1, #4, #7, #10, #13), NUMBERS.md, and the
+  fee-assessment code in LedgerEngine.assessFees.
+- Verified every figure against a fresh `mvn -q compile exec:java` run:
+  Auth-A approval inputs (ledger 250.00, holds 0.00, requested 200.00 -> available
+  50.00); Auth-B decline input (ledger -155.00); fee trace -370.00/-180.00/-205.00
+  valued D2/D4/D5 all assessed 2026-01-05; finals 390.93 / 10.008; interest
+  0.93 / 0.008.
+- Verified the batch-pre-fee series by hand: D3 = -370+400 = 30.00, D4 = -155.00,
+  D5 = -155.00 (no fees posted).
+- WORKLOG evidence check for abandoned approaches: grouping-by-day (15:13 test
+  failure) and mark-only-when-charged (15:00 code-review catch) have direct records;
+  full-recompute, clipping, aggregate-rounding, value-date holds were design-time
+  considerations documented in AMBIGUITIES.md, never implemented — the revised
+  section now says exactly that instead of implying experiments.
+
+## 2026-10-18 19:20 IST — Targeted edits to REJECTED.md (only file changed)
+
+1. Reference series renamed to "Sequential fee-assessment balances (before each
+   date's own fee)" with the sequential computation shown; added the distinct
+   batch-pre-fee series (250.00 / -370.00 / 30.00 / -155.00 / -155.00) and an
+   explicit note that neither series is called bare "pre-fee".
+2. Criterion 3 rewritten around the approval-time figures (250.00 ledger, 200.00
+   hold, 50.00 available, APPROVED), with the 225.00/25.00 pair explicitly labelled
+   a later projected view. Criterion 5 restructured the same way: decline explained
+   from the processing-time -155.00; Auth-A mechanism shown in both views without
+   conflating timelines.
+3. Criterion 2 reworded: rejection tied to the documented per-negative-account-day
+   policy; "every reasonable model" claim removed; the lagged/targeted
+   single-fee model acknowledged and cross-referenced; three-fee result verified
+   against the fee trace and tests.
+4. Criterion 6: kept REJECTED under the immutable-fee policy; now states explicitly
+   that pre-fee balances return while post-fee balances do not, that immutability
+   is a deliberate auditability choice (corrections via explicit compensating
+   entries), and that full recompute is also defensible with policy-dependent
+   outcomes.
+5. Criterion 8: now leads with the specification's explicit prohibition on
+   discarding remainders, conservation as supporting reasoning; arithmetic
+   preserved (0.93 vs 0.918 -> 0.92, difference 0.01); aggregate-rounding described
+   as valid if paired with an explicit deterministic reconciliation policy.
+6. Abandoned-approaches section: added an honesty note on evidence; item 1 explains
+   the E10-before-E9 stream-order violation (grouping itself not condemned); item 3
+   describes immutable fees as the chosen policy with corrections via explicit
+   compensation; items 3-6 qualified as design-time considerations, not experiments.
+
+## 2026-10-18 19:25 IST — Validation
+
+- `git diff --stat`: only REJECTED.md changed (163 insertions, 86 deletions). No
+  application code, tests, or other docs touched.
+- `mvn clean test`: 79 tests, 0 failures — BUILD SUCCESS (re-run after the edits;
+  REJECTED.md is documentation, but the suite was executed to confirm the
+  repository remains green).
+- Terminology cross-check: AMBIGUITIES.md #1 defines "pre-fee" exactly as the
+  sequential before-own-fee meaning used in REJECTED.md; NUMBERS.md contains no
+  conflicting series.
