@@ -190,3 +190,20 @@ policy, interest policy) are preserved — review found no contradiction.
   0.008) — verified by full run.
 - `mvn test`: 62 tests, 0 failures — BUILD SUCCESS. Intentional-failure test still
   fails for its documented reason when run via its tag (250.00 vs 225.00).
+
+## 2026-10-18 18:10 IST — Stage C committed (77dc38d) and final verification
+
+- Docs updated: AMBIGUITIES.md gained #22 (reversal validate-then-post ordering),
+  #23 (time model), #24 (out-of-horizon rejection), #25 (duplicate event ids),
+  #26 (non-positive amounts); #21 rewritten for the corrected reversal rules.
+  ARCHITECTURE.md gained a Time model section and a Performance notes section
+  (complexity of closingBalance/assessFees/capitalizeInterest documented; no index
+  added — the snapshot-invalidation trap for late value-dated events is exactly what
+  the intentional-failure test demonstrates). NUMBERS.md updated (window dates,
+  business zone). README.md updated (date-bearing report example, time model section,
+  layout, test count 45 -> 62).
+- Final verification from clean state: `mvn clean test` -> 62 tests, 0 failures,
+  BUILD SUCCESS; `mvn test -Dsurefire.groups=intentional-failure
+  -Dsurefire.excludedGroups=` -> 1 test, 1 failure (expected, documented);
+  `mvn -q compile exec:java` -> report figures unchanged (390.93 / 10.008 / -75.00 /
+  0.93 / 0.008).
