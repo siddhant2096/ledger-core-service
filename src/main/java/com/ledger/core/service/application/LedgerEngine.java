@@ -125,9 +125,9 @@ public final class LedgerEngine {
             return new Outcome.Rejected("UNKNOWN_ACCOUNT: " + event.accountId());
         }
         return switch (event) {
-            case LedgerEvent.Credit e -> postFinancial(envelope, account, e.amount(), EntryKind.POSTING,
+            case LedgerEvent.Credit e -> postFinancial(envelope, account, e.amount(), true,
                     "Credit", entries, sequence);
-            case LedgerEvent.Debit e -> postFinancial(envelope, account, e.amount().negate(), EntryKind.POSTING,
+            case LedgerEvent.Debit e -> postFinancial(envelope, account, e.amount(), false,
                     "Debit", entries, sequence);
             case LedgerEvent.InstalmentCredit e -> postInstalments(envelope, account, e, entries, sequence);
             case LedgerEvent.AuthorizationRequest e -> decideAuthorization(envelope, account, e, entries,
@@ -137,18 +137,24 @@ public final class LedgerEngine {
         };
     }
 
-    private Outcome postFinancial(EventEnvelope envelope, Account account, Money signedAmount,
-                                  EntryKind kind, String description,
+    private Outcome postFinancial(EventEnvelope envelope, Account account, Money unsignedAmount,
+                                  boolean credit, String description,
                                   List<LedgerEntry> entries, long[] sequence) {
-        Outcome currencyCheck = checkCurrency(envelope, account, signedAmount);
+        Outcome currencyCheck = checkCurrency(envelope, account, unsignedAmount);
         if (currencyCheck != null) {
             return currencyCheck;
         }
-        if (kind == EntryKind.POSTING && signedAmount.isZero()) {
-            return new Outcome.Rejected("ZERO_AMOUNT: posting amount must be non-zero");
+        // Credit/Debit amounts must be strictly positive: a negative Credit
+        // would otherwise post as a backdoor debit (and vice versa). The
+        // direction of money flow must come from the event TYPE, never from a
+        // smuggled-in sign.
+        if (!unsignedAmount.isPositive()) {
+            return new Outcome.Rejected("NON_POSITIVE_AMOUNT: " + description
+                    + " amount must be positive, got " + unsignedAmount);
         }
+        Money signedAmount = credit ? unsignedAmount : unsignedAmount.negate();
         appendEntry(entries, sequence, envelope.eventId(), account.id(), signedAmount,
-                envelope.valueDay(), envelope.processingDay(), kind, description);
+                envelope.valueDay(), envelope.processingDay(), EntryKind.POSTING, description);
         return new Outcome.Accepted(description + " posted");
     }
 
@@ -158,6 +164,11 @@ public final class LedgerEngine {
         Outcome currencyCheck = checkCurrency(envelope, account, e.totalAmount());
         if (currencyCheck != null) {
             return currencyCheck;
+        }
+        if (!e.totalAmount().isPositive()) {
+            // A zero-total instalment credit would post zero-value entries
+            // (noise in the books); negative totals are nonsense for a credit.
+            return new Outcome.Rejected("NON_POSITIVE_INSTALMENT_TOTAL: " + e.totalAmount());
         }
         List<Money> parts = InstalmentAllocator.allocate(e.totalAmount(), e.instalmentCount());
         for (int i = 0; i < parts.size(); i++) {
@@ -249,11 +260,22 @@ public final class LedgerEngine {
                             List<LedgerEntry> entries,
                             Set<String> reversedEventIds,
                             long[] sequence) {
-        // Duplicate protection: each source event may be reversed at most once.
-        if (!reversedEventIds.add(e.targetEventId())) {
+        // Validation order matters: NOTHING is mutated until every check has
+        // passed and the compensation entry has been posted. Marking the target
+        // id as reversed before validation would let a FAILED reversal (e.g. of
+        // an unknown target) poison the id and block a later, legitimate
+        // reversal of an event that subsequently arrives with that id.
+
+        // 1. Duplicate protection: a target id is in this set IFF a reversal of
+        //    it has already SUCCEEDED, so membership is proof of a prior
+        //    reversal, not of a prior attempt.
+        if (reversedEventIds.contains(e.targetEventId())) {
             return new Outcome.Rejected("DUPLICATE_REVERSAL: " + e.targetEventId()
                     + " has already been reversed");
         }
+        // 2. Target existence: a reversal of a rejected event also lands here,
+        //    because a rejected event derives no entries — consistent with
+        //    "rejected means it did not happen, accounting-wise".
         List<LedgerEntry> targets = entries.stream()
                 .filter(en -> en.sourceEventId().equals(e.targetEventId()))
                 .toList();
@@ -261,8 +283,12 @@ public final class LedgerEngine {
             return new Outcome.Rejected("REVERSAL_TARGET_UNKNOWN: no entries derived from "
                     + e.targetEventId());
         }
+        // 3. Eligibility and ownership of EVERY derived entry (multi-entry
+        //    events such as instalment credits are validated as a whole).
         for (LedgerEntry target : targets) {
             if (target.kind() != EntryKind.POSTING && target.kind() != EntryKind.INSTALMENT_POSTING) {
+                // Also covers reversal-of-a-reversal: a compensation entry is
+                // not POSTING, so re-reversing it is rejected here.
                 return new Outcome.Rejected("REVERSAL_UNSUPPORTED_TARGET: "
                         + e.targetEventId() + " produced " + target.kind() + " entries");
             }
@@ -271,11 +297,11 @@ public final class LedgerEngine {
                         + " is on " + target.accountId());
             }
         }
-        // Exact accounting compensation: reverse the SUM of the target event's
-        // postings (so multi-part instalment credits are compensated in full)
-        // with a single entry of opposite sign, value date taken from the
-        // REVERSAL event. The original event and entries are never mutated
-        // or deleted.
+        // 4. Exact accounting compensation: reverse the SUM of the target
+        //    event's postings (so a multi-part instalment credit is compensated
+        //    in full) with a single entry of opposite sign, value date taken
+        //    from the REVERSAL event. The original event and entries are never
+        //    mutated or deleted.
         Money compensation = Money.zero(account.currency());
         for (LedgerEntry target : targets) {
             compensation = compensation.add(target.amount());
@@ -284,6 +310,11 @@ public final class LedgerEngine {
                 compensation.negate(), envelope.valueDay(), envelope.processingDay(),
                 EntryKind.REVERSAL_COMPENSATION,
                 "Reversal of " + e.targetEventId() + " (" + targets.getFirst().description() + ")");
+        // 5. State transition last: only a successfully posted reversal marks
+        //    the target as reversed. Atomic within the single-threaded
+        //    processing model: validation and posting observe and mutate the
+        //    same in-memory state in one step, with no interleaving.
+        reversedEventIds.add(e.targetEventId());
         return new Outcome.Accepted("Reversal posted as compensation of " + e.targetEventId());
     }
 

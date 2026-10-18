@@ -119,3 +119,43 @@ Cross-checked engine output by hand (value-date order, ACC-001):
   0.004/0.004, capitalized 0.008.
 - Auth-A PARTIALLY_SETTLED (185.00/200.00, residual released); Auth-B DECLINED;
   E6 (Auth-Z) REJECTED — unknown authorization, no funds moved.
+
+---
+
+# Phase 2 — Review and improvement task
+
+## 2026-10-18 17:38 IST — Baseline
+
+- Repo clean on `main` at `954ca46`, 6 commits ahead of origin.
+- Baseline run: `mvn clean test` → 45 tests, 0 failures — BUILD SUCCESS.
+
+## 2026-10-18 17:40 IST — Review findings and plan
+
+Bugs / gaps found by inspection of `LedgerEngine` and domain classes:
+
+1. **Reversal state-mutation bug (real bug)**: `reverse()` calls
+   `reversedEventIds.add(targetEventId)` BEFORE validating the target exists and is
+   eligible. A failed reversal (e.g. unknown target) poisons the id so a later,
+   legitimate reversal of an event with that id is rejected as DUPLICATE_REVERSAL.
+2. **Negative/zero amounts**: `postFinancial` rejects zero but not NEGATIVE amounts —
+   a `Credit(-50)` would post as a backdoor debit. `InstalmentCredit` with a zero
+   total posts zero-value entries. No business rule permits either.
+3. **Duplicate event IDs**: a second event with an existing id would double-post and
+   silently overwrite the first event's outcome in the `Map<String, Outcome>` — a
+   data-integrity and idempotency hole.
+4. **Out-of-horizon dates**: an event whose value day is outside the window is
+   accepted but its posting is invisible to fee assessment and reports (assessment
+   only covers days up to the processing day, interest only up to the horizon) —
+   silent inconsistency. No validation existed.
+5. **Time model**: integer days work but the review task asks for a clearer model.
+   Plan (minimal, documented): `LocalDate processingDate` + `LocalDate valueDate` +
+   explicit `long streamPosition` on `EventEnvelope`; a configured `ZoneId` on the
+   engine as the ONLY sanctioned way to derive business dates from instants
+   (utility + test). `Instant occurredAt/receivedAt` deliberately NOT added: the
+   input stream carries no instants and no rule consumes them — adding them would
+   fabricate data (documented in AMBIGUITIES.md).
+
+Plan: (A) correctness fixes + reversal tests; (B) time-model migration + duplicate
+event-id rejection + out-of-horizon validation + outcome keying by stream position;
+(C) documentation updates. Existing business rules (fee persistence, settlement
+policy, interest policy) are preserved — review found no contradiction.

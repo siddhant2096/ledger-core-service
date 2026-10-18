@@ -192,6 +192,38 @@ class BoundaryAndValidationTest {
     }
 
     @Test
+    void negativeAndZeroAmountsAreRejected() {
+        // A negative Credit would be a backdoor debit; a zero Debit is noise.
+        // Direction must come from the event type, never from a smuggled sign.
+        ReplayResult result = run(List.of(AED_ACCOUNT), List.of(
+                new EventEnvelope("X1", 1, 1,
+                        new LedgerEvent.Credit("A", Money.of("-50.00", CurrencyCode.AED))),
+                new EventEnvelope("X2", 1, 1,
+                        new LedgerEvent.Debit("A", Money.of("0.00", CurrencyCode.AED))),
+                new EventEnvelope("X3", 1, 1,
+                        new LedgerEvent.Debit("A", Money.of("-5.00", CurrencyCode.AED)))));
+        for (String id : List.of("X1", "X2", "X3")) {
+            Outcome outcome = result.outcomeOf(id);
+            assertInstanceOf(Outcome.Rejected.class, outcome, id);
+            assertTrue(((Outcome.Rejected) outcome).reason().contains("NON_POSITIVE_AMOUNT"), id);
+        }
+        assertTrue(result.entries().isEmpty());
+        assertEquals(Money.zero(CurrencyCode.AED),
+                LedgerEngine.closingBalance(result.entries(), AED_ACCOUNT, 6));
+    }
+
+    @Test
+    void zeroTotalInstalmentCreditIsRejected() {
+        ReplayResult result = run(List.of(BHD_ACCOUNT), List.of(
+                new EventEnvelope("X1", 1, 1,
+                        new LedgerEvent.InstalmentCredit("B", Money.of("0.000", CurrencyCode.BHD), 3))));
+        Outcome outcome = result.outcomeOf("X1");
+        assertInstanceOf(Outcome.Rejected.class, outcome);
+        assertTrue(((Outcome.Rejected) outcome).reason().contains("NON_POSITIVE_INSTALMENT_TOTAL"));
+        assertTrue(result.entries().isEmpty());
+    }
+
+    @Test
     void unknownAccountIsRejected() {
         ReplayResult result = run(List.of(AED_ACCOUNT), List.of(
                 new EventEnvelope("X1", 1, 1,
